@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "Phase 6 task-report properties for deterministic fixture and real-repository evaluation.",
+  "cases": [
+    {
+      "name": "qualified transaction target",
+      "task": "add retry handling to SubmitTransaction",
+      "required_seed_name": "SubmitTransaction",
+      "required_labels": ["must-read", "high", "direct-test"],
+      "max_unrelated_context_items": 8
+    },
+    {
+      "name": "duplicate helper names",
+      "task": "update helper",
+      "required_seed_status": "ambiguous",
+      "requires_qualified_override": true
+    },
+    {
+      "name": "no match",
+      "task": "missing operation",
+      "required_seed_status": "no-match",
+      "max_selected_items": 0
+    },
+    {
+      "name": "interface implementation",
+      "task": "change provider transfer",
+      "required_relationships": ["implements", "possible_call"],
+      "requires_validation_radius": true
+    },
+    {
+      "name": "high fanout",
+      "task": "rename shared dependency",
+      "max_depth": 2,
+      "max_fanout": 8,
+      "requires_truncation_diagnostic": true
+    }
+  ]
+}

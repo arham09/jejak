@@ -1,0 +1,12 @@
+# Compiled CLI binary from `go build ./cmd/jejak`
+/jejak
+
+# Go test and coverage artifacts
+*.test
+*.out
+
+# macOS directory metadata
+.DS_Store
+
+# Local design notes, phase plans, and completion evidence
+/docs/
