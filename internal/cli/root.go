@@ -269,7 +269,7 @@ Global options:
       --data-dir <path>  override the external Jejak data root
       --download-deps     explicitly allow missing Go dependencies to download
   -q, --quiet             suppress successful synchronization output
-      --json              render agent-facing reports as versioned JSON
+      --json              render agent-facing reports (and graph queries) as versioned JSON
       --committed         inspect only the durable committed graph
       --tags <a,b>        select additional Go build tags
       --goos <name>       select a Go target operating system
@@ -282,8 +282,9 @@ Commands implemented in the foundation, Go intelligence, semantic graph, increme
       --no-agent-skills   skip project-local Claude and Codex skill integration
   status                 show repository, worktree, and graph state
   repos list             list registered repositories
-  graph symbol <name>    inspect an effective symbol and references
+  graph symbol <name>    inspect an effective symbol and relationships
   graph file <path>      inspect an effective source file
+      --format <name>    graph output: text (default), json, or dot
       --committed         force graph inspection to the durable generation
       --working-tree      inspect the temporary working-tree overlay
   sync                   synchronize the graph with committed HEAD

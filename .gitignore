@@ -10,3 +10,8 @@
 
 # Local design notes, phase plans, and completion evidence
 /docs/
+
+# Agentic pipeline runtime artifacts
+.agent/tasks/
+.agent/current-task
+.agent/*.md

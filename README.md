@@ -40,6 +40,8 @@ go build -o jejak ./cmd/jejak
 ./jejak init
 ./jejak status
 ./jejak graph symbol MyFunction
+./jejak graph --format json symbol MyFunction
+./jejak graph --format dot symbol MyFunction | dot -Tsvg -o graph.svg
 ./jejak impact --task "change MyFunction behavior"
 ./jejak context --task "change MyFunction behavior"
 ```
@@ -107,7 +109,27 @@ repository. SQLite uses WAL mode; parse cache and temporary snapshots are
 rebuildable. Remove a repository store only after confirming the exact
 `repos/<repo-id>` path, or use `gc` for scoped cleanup.
 
-## JSON and diagnostics
+## Graph exports, JSON, and diagnostics
+
+Pass `--format json` to a `graph symbol` or `graph file` query for a versioned,
+deterministic graph projection intended for agents and other tools. The JSON
+includes the query, repository/worktree/generation provenance, typed nodes,
+directed edges, confidence, evidence locations, and historical markers. The
+existing `--json` flag is also accepted as the graph JSON compatibility alias.
+
+Pass `--format dot` for deterministic Graphviz DOT from the same projection:
+
+```sh
+jejak graph --format dot symbol MyFunction | dot -Tsvg -o graph.svg
+jejak graph --format dot --committed file internal/payment.go | dot -Tpng -o graph.png
+```
+
+Graph exports are query-scoped and read-only. Jejak emits DOT but does not
+install or invoke Graphviz; the `dot` command is an optional external renderer.
+Both formats follow the default working-tree overlay and explicit
+`--committed` source boundaries. Possible, unresolved, inferred, and
+historical relationships remain explicitly labelled rather than implying
+runtime certainty.
 
 Pass `--json` to `doctor`, `gc`, `impact`, or `context` for a versioned,
 machine-readable report. Health and maintenance commands distinguish healthy,
