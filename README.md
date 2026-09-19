@@ -126,3 +126,7 @@ are labelled rather than presented as exact.
 Run `jejak help` for the command syntax and `jejak doctor` for the health of
 an installation. `CLAUDE.md` describes the package boundaries and the
 behavioral contracts that this repository keeps.
+
+## License
+
+Jejak is released under the MIT License. See [LICENSE](LICENSE).
