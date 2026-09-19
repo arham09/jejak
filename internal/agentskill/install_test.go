@@ -133,6 +133,63 @@ func TestInstallPreservesExistingClaudeDirectoryWithoutSkill(t *testing.T) {
 	}
 }
 
+func TestInstallAdoptsEmptyClaudeSkillDirectory(t *testing.T) {
+	root := t.TempDir()
+	claudePath := filepath.Join(root, filepath.FromSlash(canonicalRelativePath))
+	if err := os.MkdirAll(claudePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Install(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Changed {
+		t.Fatal("adopting an empty Claude skill directory did not report a change")
+	}
+	if state := findState(t, report, "Claude"); state.Status != StatusInstalled {
+		t.Fatalf("Claude state = %#v", state)
+	}
+	contents, err := os.ReadFile(filepath.Join(claudePath, canonicalFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, canonicalSkill) {
+		t.Fatal("adopted skill differs from the embedded canonical skill")
+	}
+	if state := findState(t, report, "Codex"); state.Status != StatusInstalled {
+		t.Fatalf("Codex state = %#v", state)
+	}
+}
+
+func TestInstallAdoptsEmptyCodexSkillDirectory(t *testing.T) {
+	root := t.TempDir()
+	linkPath := filepath.Join(root, filepath.FromSlash(codexLink.relative))
+	if err := os.MkdirAll(linkPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Install(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := findState(t, report, "Codex"); state.Status != StatusInstalled {
+		t.Fatalf("Codex state = %#v", state)
+	}
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("empty Codex directory was not replaced by a symlink")
+	}
+	resolved, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != report.CanonicalPath {
+		t.Fatalf("Codex resolves to %q, want %q", resolved, report.CanonicalPath)
+	}
+}
+
 func TestInstallPreservesConflictingCodexPath(t *testing.T) {
 	root := t.TempDir()
 	conflictPath := filepath.Join(root, filepath.FromSlash(codexLink.relative))

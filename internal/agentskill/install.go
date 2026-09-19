@@ -202,9 +202,17 @@ func installCanonicalSkill(root, canonicalPath, legacyPath string, legacyManaged
 	switch {
 	case errors.Is(skillErr, fs.ErrNotExist):
 		if !directoryCreated {
-			state.Status = StatusConflict
-			state.Detail = "existing Claude skill directory has no SKILL.md; preserved"
-			return state, parentChanged, false, nil
+			empty, emptyErr := directoryIsEmpty(canonicalPath)
+			if emptyErr != nil {
+				state.Status = StatusError
+				state.Detail = emptyErr.Error()
+				return state, parentChanged, false, emptyErr
+			}
+			if !empty {
+				state.Status = StatusConflict
+				state.Detail = "existing Claude skill directory has no SKILL.md; preserved"
+				return state, parentChanged, false, nil
+			}
 		}
 		if writeErr := writeFileAtomic(skillPath, canonicalSkill, 0o644); writeErr != nil {
 			state.Status = StatusError
@@ -264,21 +272,14 @@ func installCodexLink(root, canonicalPath, legacyPath string, legacyManaged bool
 	info, err := os.Lstat(linkPath)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		target, relErr := filepath.Rel(filepath.Dir(linkPath), canonicalPath)
-		if relErr != nil {
-			wrapped := fmt.Errorf("resolve Codex skill symlink target: %w", relErr)
+		target, linkErr := linkCodexSkill(linkPath, canonicalPath)
+		if linkErr != nil {
 			state.Status = StatusError
-			state.Detail = wrapped.Error()
-			return state, changed, wrapped
-		}
-		if symlinkErr := os.Symlink(target, linkPath); symlinkErr != nil {
-			wrapped := fmt.Errorf("create Codex skill symlink %q: %w", linkPath, symlinkErr)
-			state.Status = StatusError
-			state.Detail = wrapped.Error()
-			return state, changed, wrapped
+			state.Detail = linkErr.Error()
+			return state, changed, linkErr
 		}
 		state.Status = StatusInstalled
-		state.Detail = fmt.Sprintf("linked to %s", filepath.ToSlash(target))
+		state.Detail = fmt.Sprintf("linked to %s", target)
 		return state, true, nil
 	case err != nil:
 		wrapped := fmt.Errorf("inspect Codex skill path %q: %w", linkPath, err)
@@ -286,9 +287,26 @@ func installCodexLink(root, canonicalPath, legacyPath string, legacyManaged bool
 		state.Detail = wrapped.Error()
 		return state, changed, wrapped
 	case info.Mode()&os.ModeSymlink == 0:
-		state.Status = StatusConflict
-		state.Detail = "existing Codex skill path is not a symlink; preserved"
-		return state, changed, nil
+		adopted, adoptErr := adoptEmptyDirectory(linkPath, info)
+		if adoptErr != nil {
+			state.Status = StatusError
+			state.Detail = adoptErr.Error()
+			return state, changed, adoptErr
+		}
+		if !adopted {
+			state.Status = StatusConflict
+			state.Detail = "existing Codex skill path is not a symlink; preserved"
+			return state, changed, nil
+		}
+		target, linkErr := linkCodexSkill(linkPath, canonicalPath)
+		if linkErr != nil {
+			state.Status = StatusError
+			state.Detail = linkErr.Error()
+			return state, true, linkErr
+		}
+		state.Status = StatusInstalled
+		state.Detail = fmt.Sprintf("linked to %s", target)
+		return state, true, nil
 	}
 
 	target, err := os.Readlink(linkPath)
@@ -331,6 +349,45 @@ func installCodexLink(root, canonicalPath, legacyPath string, legacyManaged bool
 	state.Status = StatusConflict
 	state.Detail = fmt.Sprintf("existing Codex symlink points to %q; preserved", target)
 	return state, changed, nil
+}
+
+// linkCodexSkill points the Codex discovery path at the canonical skill
+// directory through a relative symlink and reports the recorded target.
+func linkCodexSkill(linkPath, canonicalPath string) (string, error) {
+	target, err := filepath.Rel(filepath.Dir(linkPath), canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex skill symlink target: %w", err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		return "", fmt.Errorf("create Codex skill symlink %q: %w", linkPath, err)
+	}
+	return filepath.ToSlash(target), nil
+}
+
+// directoryIsEmpty reports whether the directory holds no entries. An empty
+// managed path carries no user content, so installation may adopt it.
+func directoryIsEmpty(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, fmt.Errorf("inspect agent skill directory %q: %w", path, err)
+	}
+	return len(entries) == 0, nil
+}
+
+// adoptEmptyDirectory removes path when it is an empty directory. Any other
+// content stays in place and remains a reported conflict.
+func adoptEmptyDirectory(path string, info fs.FileInfo) (bool, error) {
+	if !info.IsDir() {
+		return false, nil
+	}
+	empty, err := directoryIsEmpty(path)
+	if err != nil || !empty {
+		return false, err
+	}
+	if err := os.Remove(path); err != nil {
+		return false, fmt.Errorf("remove empty agent skill directory %q: %w", path, err)
+	}
+	return true, nil
 }
 
 func resolveLinkTarget(linkPath, target string) string {
