@@ -158,6 +158,20 @@ func (v *View) FindSymbolForImpact(ctx context.Context, key string, limit int) (
 	masked := cloneKeySet(v.maskedKeys)
 	affected := clonePathSet(v.affectedPath)
 	v.mu.RUnlock()
+	// Prefer the base's bounded lookup. Impact traversal asks for many base
+	// symbols, and the unbounded query below loads the complete relationship
+	// fanout of each one, which is what the bound exists to avoid.
+	if bounded, ok := base.(boundedBaseReader); ok {
+		if candidate, err := bounded.FindSymbolForImpact(ctx, key, limit); err == nil {
+			if baseSymbolMasked(candidate.Symbol, masked, affected) {
+				return graph.SymbolResult{}, fmt.Errorf("symbol %q is unavailable in the effective graph", key)
+			}
+			return limitResult(sanitizeResult(candidate, masked, affected), limit), nil
+		}
+		// Any bounded failure falls through. The lookup below matches a plain
+		// symbol name as well as a canonical key, and it owns the error a
+		// caller sees, so the fast path can never narrow the result.
+	}
 	item, err := base.FindSymbols(ctx, key)
 	if err != nil {
 		return graph.SymbolResult{}, err
@@ -169,6 +183,13 @@ func (v *View) FindSymbolForImpact(ctx context.Context, key string, limit int) (
 		return limitResult(sanitizeResult(candidate, masked, affected), limit), nil
 	}
 	return graph.SymbolResult{}, fmt.Errorf("symbol %q is unavailable in the effective graph", key)
+}
+
+// boundedBaseReader is the optional bounded lookup of a base graph view. The
+// overlay consumes it so traversal does not pay for a full relationship
+// fanout per base symbol.
+type boundedBaseReader interface {
+	FindSymbolForImpact(context.Context, string, int) (graph.SymbolResult, error)
 }
 
 func (v *View) buildEffectiveSymbols() {

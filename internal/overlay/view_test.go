@@ -169,3 +169,152 @@ func TestOverlaySearchKeepsBestMatchesWhenTruncating(t *testing.T) {
 		t.Fatalf("first result = %q, want CreateDraftTransaction; got %v", found[0].Symbol.Name, names)
 	}
 }
+
+// boundedTestReader records which base lookup the overlay chose. The unbounded
+// calls return a different, larger payload so a test can tell them apart.
+type boundedTestReader struct {
+	gen            graph.Generation
+	symbol         graph.Symbol
+	file           graph.File
+	boundedSymbol  int
+	unboundedSym   int
+	boundedFile    int
+	unboundedFile  int
+	boundedRelated []graph.SymbolRelationship
+	fullRelated    []graph.SymbolRelationship
+}
+
+func (r *boundedTestReader) Generation() graph.Generation { return r.gen }
+
+func (r *boundedTestReader) SearchSymbols(context.Context, []string, int) ([]graph.SymbolResult, error) {
+	return nil, nil
+}
+
+func (r *boundedTestReader) FindSymbols(_ context.Context, query string) ([]graph.SymbolResult, error) {
+	r.unboundedSym++
+	if query != r.symbol.Key {
+		return nil, fmt.Errorf("symbol %q not found", query)
+	}
+	return []graph.SymbolResult{{Symbol: r.symbol, Calls: append([]graph.SymbolRelationship(nil), r.fullRelated...)}}, nil
+}
+
+func (r *boundedTestReader) FindSymbolForImpact(_ context.Context, key string, _ int) (graph.SymbolResult, error) {
+	r.boundedSymbol++
+	if key != r.symbol.Key {
+		return graph.SymbolResult{}, fmt.Errorf("symbol %q not found", key)
+	}
+	return graph.SymbolResult{Symbol: r.symbol, Calls: append([]graph.SymbolRelationship(nil), r.boundedRelated...)}, nil
+}
+
+func (r *boundedTestReader) FindFile(_ context.Context, query string) (graph.FileResult, error) {
+	r.unboundedFile++
+	if query != r.file.Path && query != r.file.Key {
+		return graph.FileResult{}, fmt.Errorf("file %q not found", query)
+	}
+	return graph.FileResult{File: r.file, SymbolResults: []graph.SymbolResult{{Symbol: r.symbol, Calls: append([]graph.SymbolRelationship(nil), r.fullRelated...)}}}, nil
+}
+
+func (r *boundedTestReader) FindFileMetadata(_ context.Context, query string) (graph.File, error) {
+	r.boundedFile++
+	if query != r.file.Path && query != r.file.Key {
+		return graph.File{}, fmt.Errorf("file %q not found", query)
+	}
+	return r.file, nil
+}
+
+func newBoundedTestReader() *boundedTestReader {
+	packageKey := "go:package:fixture"
+	file := graph.File{Key: "file:base.go", Path: "base.go", BlobSHA: "base-blob", PackageKey: packageKey}
+	symbol := graph.Symbol{Key: "symbol:Base", Kind: graph.NodeFunction, PackageKey: packageKey, FileKey: file.Key, Name: "Base", Position: graph.Position{Path: file.Path, StartLine: 1, EndLine: 1}}
+	return &boundedTestReader{
+		gen:            graph.Generation{RepoID: "repo", WorktreeID: "worktree", ID: 1, Commit: "commit", BuildFingerprint: "base"},
+		symbol:         symbol,
+		file:           file,
+		boundedRelated: []graph.SymbolRelationship{{SourceKey: symbol.Key, TargetKey: "symbol:Bounded", Kind: graph.EdgeCalls, TargetName: "Bounded"}},
+		fullRelated: []graph.SymbolRelationship{
+			{SourceKey: symbol.Key, TargetKey: "symbol:Duplicate", Kind: graph.EdgeCalls, TargetName: "Duplicate"},
+			{SourceKey: symbol.Key, TargetKey: "symbol:Duplicate", Kind: graph.EdgeCalls, TargetName: "Duplicate"},
+			{SourceKey: symbol.Key, TargetKey: "symbol:Bounded", Kind: graph.EdgeCalls, TargetName: "Bounded"},
+		},
+	}
+}
+
+func newBoundedTestView(t *testing.T, base *boundedTestReader) *View {
+	t.Helper()
+	view, err := newView(base, &Snapshot{Root: t.TempDir()}, Manifest{ID: "manifest"}, graph.AnalysisResult{BuildFingerprint: "effective"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = view.Close() })
+	return view
+}
+
+// Impact traversal reads many unchanged base symbols. Loading each one's full
+// relationship fanout and trimming afterwards spends the bound on duplicate
+// evidence, which both costs time and hides real neighbours, so the overlay
+// must delegate to the base's bounded lookup.
+func TestOverlayImpactLookupUsesTheBaseBoundedQuery(t *testing.T) {
+	base := newBoundedTestReader()
+	view := newBoundedTestView(t, base)
+
+	result, err := view.FindSymbolForImpact(context.Background(), base.symbol.Key, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.boundedSymbol != 1 {
+		t.Fatalf("bounded base lookups = %d, want 1", base.boundedSymbol)
+	}
+	if base.unboundedSym != 0 {
+		t.Fatalf("unbounded base lookups = %d, want 0", base.unboundedSym)
+	}
+	if len(result.Calls) != 1 || result.Calls[0].TargetKey != "symbol:Bounded" {
+		t.Fatalf("relationships = %#v, want the bounded set", result.Calls)
+	}
+}
+
+// File provenance must not drag in every declaration the file contains.
+func TestOverlayFileMetadataUsesTheBaseMetadataQuery(t *testing.T) {
+	base := newBoundedTestReader()
+	view := newBoundedTestView(t, base)
+
+	file, err := view.FindFileMetadata(context.Background(), base.file.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Key != base.file.Key || file.BlobSHA != base.file.BlobSHA {
+		t.Fatalf("file = %#v, want %#v", file, base.file)
+	}
+	if base.boundedFile != 1 {
+		t.Fatalf("metadata lookups = %d, want 1", base.boundedFile)
+	}
+	if base.unboundedFile != 0 {
+		t.Fatalf("full file lookups = %d, want 0", base.unboundedFile)
+	}
+}
+
+// A reader without the bounded lookups must still work.
+func TestOverlayFallsBackWhenTheBaseHasNoBoundedLookups(t *testing.T) {
+	gen := graph.Generation{RepoID: "repo", WorktreeID: "worktree", ID: 1, Commit: "commit"}
+	symbol := graph.Symbol{Key: "symbol:Base", Kind: graph.NodeFunction, PackageKey: "go:package:fixture", FileKey: "file:base.go", Name: "Base", Position: graph.Position{Path: "base.go", StartLine: 1, EndLine: 1}}
+	base := &viewTestReader{
+		gen:     gen,
+		symbols: map[string][]graph.SymbolResult{symbol.Key: {{Symbol: symbol}}},
+		files:   map[string]graph.FileResult{"base.go": {File: graph.File{Key: "file:base.go", Path: "base.go", BlobSHA: "base-blob", PackageKey: "go:package:fixture"}}},
+	}
+	view, err := newView(base, &Snapshot{Root: t.TempDir()}, Manifest{ID: "manifest"}, graph.AnalysisResult{BuildFingerprint: "effective"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = view.Close() }()
+
+	if _, err := view.FindSymbolForImpact(context.Background(), symbol.Key, 8); err != nil {
+		t.Fatalf("symbol fallback failed: %v", err)
+	}
+	file, err := view.FindFileMetadata(context.Background(), "base.go")
+	if err != nil {
+		t.Fatalf("file fallback failed: %v", err)
+	}
+	if file.BlobSHA != "base-blob" {
+		t.Fatalf("file = %#v", file)
+	}
+}

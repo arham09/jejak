@@ -56,7 +56,7 @@ func (v *View) FindFileMetadata(ctx context.Context, query string) (graph.File, 
 	if v == nil {
 		return graph.File{}, errors.New("overlay view is nil")
 	}
-	result, err := v.FindFile(ctx, query)
+	file, err := v.effectiveFileMetadata(ctx, query)
 	if err != nil {
 		// Deleted/renamed declarations are masked from effective file
 		// inspection, but impact context still needs their immutable baseline
@@ -79,7 +79,58 @@ func (v *View) FindFileMetadata(ctx context.Context, query string) (graph.File, 
 		}
 		return graph.File{}, err
 	}
-	return result.File, nil
+	return file, nil
+}
+
+// effectiveFileMetadata resolves file provenance without loading the
+// declarations a file contains.
+//
+// Impact traversal asks for many files, and the full file query loads every
+// symbol and every relationship each one declares. Asking the base for
+// metadata alone keeps the same masking rules while skipping that fanout.
+func (v *View) effectiveFileMetadata(ctx context.Context, query string) (graph.File, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return graph.File{}, fmt.Errorf("file query is empty")
+	}
+	v.mu.RLock()
+	if v.closed {
+		v.mu.RUnlock()
+		return graph.File{}, errors.New("overlay view is closed")
+	}
+	path := strings.TrimPrefix(filepath.ToSlash(query), "file:")
+	if file, ok := v.files[path]; ok {
+		v.mu.RUnlock()
+		return file, nil
+	}
+	base := v.base
+	masked := cloneKeySet(v.maskedKeys)
+	affected := clonePathSet(v.affectedPath)
+	v.mu.RUnlock()
+	metadata, ok := base.(baseFileMetadataReader)
+	if !ok {
+		result, err := v.FindFile(ctx, query)
+		if err != nil {
+			return graph.File{}, err
+		}
+		return result.File, nil
+	}
+	file, err := metadata.FindFileMetadata(ctx, query)
+	if err != nil {
+		return graph.File{}, err
+	}
+	// The masking rules match FindFile, so a changed or deleted path stays
+	// out of effective inspection through either entry point.
+	if baseSymbolMasked(graph.Symbol{FileKey: file.Key, Position: graph.Position{Path: file.Path}}, masked, affected) || pathSetContains(affected, file.Path) {
+		return graph.File{}, fmt.Errorf("file %q is unavailable in the effective graph", query)
+	}
+	return file, nil
+}
+
+// baseFileMetadataReader is the optional provenance-only lookup of a base
+// graph view.
+type baseFileMetadataReader interface {
+	FindFileMetadata(context.Context, string) (graph.File, error)
 }
 
 // FindHistoricalFileMetadata returns committed file provenance for a deleted
