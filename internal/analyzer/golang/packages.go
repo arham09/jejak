@@ -274,40 +274,107 @@ func sanitizeGoFlags(existing string) string {
 	return strings.Join(filtered, " ")
 }
 
-func (a *Analyzer) fingerprint(ctx context.Context, input graph.AnalyzeInput, plan loadPlan) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	build := input.Build.Normalize()
-	parts := [][]byte{
+// buildSelection hashes the parts of a build identity that do not come from
+// the source tree. Both fingerprint entry points share it so a listing and a
+// materialized tree can never disagree about the same commit.
+func buildSelection(build graph.BuildConfig, workspace bool) [][]byte {
+	return [][]byte{
 		[]byte(analyzerVersion),
 		[]byte(runtime.Version()),
 		[]byte(effectiveValue(build.GOOS, os.Getenv("GOOS"), runtime.GOOS)),
 		[]byte(effectiveValue(build.GOARCH, os.Getenv("GOARCH"), runtime.GOARCH)),
 		[]byte(effectiveValue(build.CGOEnabled, os.Getenv("CGO_ENABLED"), "")),
 		[]byte(strings.Join(build.Tags, ",")),
-		[]byte(fmt.Sprintf("download=%t;workspace=%t;tests=%t", build.DownloadDependencies, plan.Workspace, build.IncludeTests)),
+		[]byte(fmt.Sprintf("download=%t;workspace=%t;tests=%t", build.DownloadDependencies, workspace, build.IncludeTests)),
 		[]byte(sanitizeGoFlags(os.Getenv("GOFLAGS"))),
 		[]byte(os.Getenv("GOPROXY")),
 	}
+}
+
+// fileIdentity describes one tracked file for the fingerprint.
+//
+// A Git blob identifier is a hash of the exact file contents, so the object
+// identity alone distinguishes every possible change to a tracked file.
+// Reading the bytes back in adds no discrimination, and it is what forced a
+// tree to be materialized before the manager could decide to reuse a
+// generation. Mode and size are kept so a permission change is also visible.
+func fileIdentity(file graph.SnapshotFile) [][]byte {
+	return [][]byte{
+		[]byte("tracked"), []byte(file.Path), []byte(file.BlobSHA),
+		[]byte(file.Mode), []byte(fmt.Sprintf("%d", file.Size)),
+	}
+}
+
+// ManifestFingerprint computes the build identity from a tree listing, without
+// materializing the tree. It must agree with fingerprint for the same commit
+// and build selection.
+func (a *Analyzer) ManifestFingerprint(ctx context.Context, input graph.ManifestInput) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if input.Manifest == nil {
+		return "", errors.New("go build fingerprint requires a tree manifest")
+	}
+	workspace, err := manifestWorkspace(input.Manifest)
+	if err != nil {
+		return "", err
+	}
+	parts := buildSelection(input.Build.Normalize(), workspace)
+	files := append([]graph.SnapshotFile(nil), input.Manifest.Files...)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	if len(files) == 0 {
+		return "", errors.New("go build fingerprint requires a non-empty tree manifest")
+	}
+	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		parts = append(parts, fileIdentity(file)...)
+	}
+	return graph.FingerprintBytes(parts...), nil
+}
+
+// manifestWorkspace reports whether the listed tree selects a Go workspace.
+// Only the root go.work decides it, so at most one file body is read.
+func manifestWorkspace(manifest *graph.Manifest) (bool, error) {
+	present := false
+	for _, file := range manifest.Files {
+		if file.Path == "go.work" {
+			present = true
+			break
+		}
+	}
+	if !present || manifest.ReadFile == nil {
+		return false, nil
+	}
+	contents, err := manifest.ReadFile("go.work")
+	if err != nil {
+		return false, fmt.Errorf("read committed go.work: %w", err)
+	}
+	if len(contents) == 0 {
+		return false, nil
+	}
+	// A malformed go.work is not a workspace here, matching discoverPlan,
+	// which reports the parse failure as a diagnostic during analysis.
+	if _, err := modfile.ParseWork("go.work", contents, nil); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (a *Analyzer) fingerprint(ctx context.Context, input graph.AnalyzeInput, plan loadPlan) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	build := input.Build.Normalize()
+	parts := buildSelection(build, plan.Workspace)
 	files := append([]graph.SnapshotFile(nil), input.Files...)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if !fingerprintPath(file.Path) {
-			// Tracked non-Go files can be selected by //go:embed or other
-			// build tooling. Include their immutable object identity without
-			// reading potentially large binary assets into the fingerprint.
-			parts = append(parts, []byte("tracked"), []byte(file.Path), []byte(file.BlobSHA), []byte(file.Mode), []byte(fmt.Sprintf("%d", file.Size)))
-			continue
-		}
-		contents, err := os.ReadFile(filepath.Join(input.Root, filepath.FromSlash(file.Path)))
-		if err != nil {
-			return "", fmt.Errorf("read build input %q: %w", file.Path, err)
-		}
-		parts = append(parts, []byte(file.Path), []byte(file.BlobSHA), contents)
+		parts = append(parts, fileIdentity(file)...)
 	}
 	if len(files) == 0 {
 		walkErr := filepath.WalkDir(input.Root, func(path string, entry os.DirEntry, walkErr error) error {

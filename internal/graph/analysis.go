@@ -28,6 +28,43 @@ type Fingerprinter interface {
 	BuildFingerprint(context.Context, AnalyzeInput) (string, error)
 }
 
+// Manifest lists one committed tree without materializing its bytes. It holds
+// exactly what a build-identity decision needs, so the manager can reuse an
+// active generation without writing a temporary checkout it would discard.
+type Manifest struct {
+	Commit       CommitSHA
+	ObjectFormat string
+	Files        []SnapshotFile
+
+	// ReadFile returns the committed contents of one repository-relative path
+	// from the same tree. It reads immutable Git objects and never the working
+	// tree. A fingerprinter uses it for the few build files it must parse, so
+	// listing a tree stays independent of any one language's build layout.
+	ReadFile func(path string) ([]byte, error)
+}
+
+// ManifestInput is the build identity question asked against a listed tree.
+type ManifestInput struct {
+	Repository repository.RepoID
+	Worktree   repository.WorktreeID
+	Commit     CommitSHA
+	Manifest   *Manifest
+	Build      BuildConfig
+}
+
+// ManifestProvider lists a committed tree without materializing it.
+type ManifestProvider interface {
+	Manifest(context.Context, string, string) (*Manifest, error)
+}
+
+// ManifestFingerprinter is an optional extension implemented by analyzers whose
+// build identity can be derived from a tree listing. Git blob identifiers are
+// content hashes, so a listing determines the source exactly and the manager
+// can decide to reuse a generation without reading any file body.
+type ManifestFingerprinter interface {
+	ManifestFingerprint(context.Context, ManifestInput) (string, error)
+}
+
 // DiffProvider supplies normalized committed-tree changes without coupling the
 // graph package to a Git implementation.
 type DiffProvider interface {

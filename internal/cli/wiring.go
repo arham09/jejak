@@ -59,6 +59,32 @@ func (p snapshotProvider) Snapshot(ctx context.Context, root, commit string) (*g
 	return graph.NewSnapshot(snapshot.Root, graph.CommitSHA(snapshot.Commit), files, snapshot.Close), nil
 }
 
+// Manifest lists the committed tree without materializing it, so the graph
+// manager can decide to reuse an active generation cheaply.
+func (p snapshotProvider) Manifest(ctx context.Context, root, commit string) (*graph.Manifest, error) {
+	manifest, err := p.client.Manifest(ctx, root, commit)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]graph.SnapshotFile, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
+		files = append(files, graph.SnapshotFile{Path: file.Path, BlobSHA: file.BlobSHA, ObjectFormat: file.ObjectFormat, Mode: file.Mode, Size: file.Size})
+	}
+	read := func(path string) ([]byte, error) {
+		contents, found, readErr := manifest.ReadObject(func(object string) ([]byte, error) {
+			return p.client.ReadBlob(ctx, root, object)
+		}, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !found {
+			return nil, nil
+		}
+		return contents, nil
+	}
+	return &graph.Manifest{Commit: graph.CommitSHA(manifest.Commit), ObjectFormat: manifest.ObjectFormat, Files: files, ReadFile: read}, nil
+}
+
 type headObserver struct{ client *git.Client }
 
 func (o headObserver) Observe(ctx context.Context, path string) (repository.Target, error) {

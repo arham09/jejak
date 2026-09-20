@@ -121,6 +121,18 @@ func (m *Manager) ensureGraph(ctx context.Context, target repository.Target, bui
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("read graph state before analysis: %w", err)
 	}
+	// Materializing a committed tree writes every tracked file to temporary
+	// storage. A graph that is already current needs none of those bytes, so
+	// the reuse decision is made first from a listing alone.
+	if !forceRebuild {
+		reused, decided, reuseErr := m.reuseFromManifest(ctx, target, state, build)
+		if reuseErr != nil {
+			return EnsureResult{}, reuseErr
+		}
+		if decided {
+			return reused, nil
+		}
+	}
 	snapshot, err := m.snapshots.Snapshot(ctx, target.Worktree.Path, string(target.Worktree.Head))
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("materialize committed source: %w", err)
@@ -159,15 +171,7 @@ func (m *Manager) ensureGraph(ctx context.Context, target repository.Target, bui
 		if err := m.verifyObservedTarget(ctx, target, commit); err != nil {
 			return EnsureResult{}, err
 		}
-		reused := EnsureResult{Generation: active, Mode: SyncModeReuse, Reason: "graph already synchronized", Reused: true}
-		if counter, ok := m.store.(generationCounter); ok {
-			reused.Analysis = AnalysisResult{BuildFingerprint: active.BuildFingerprint, AnalyzerVersion: active.AnalyzerVersion}
-			reused.Counts, err = counter.GenerationCounts(ctx, target.Repository.ID, target.Worktree.ID, active.ID)
-			if err != nil {
-				return EnsureResult{}, fmt.Errorf("count reused graph generation: %w", err)
-			}
-		}
-		return reused, nil
+		return m.reuseResult(ctx, target, active)
 	}
 
 	changes, baseAvailable, diffErr := m.changes(ctx, target.Worktree.Path, state.IndexedHead, commit)
@@ -242,6 +246,78 @@ func (m *Manager) activeGeneration(ctx context.Context, target repository.Target
 		return Generation{}, fmt.Errorf("active generation is missing")
 	}
 	return m.store.Generation(ctx, target.Repository.ID, target.Worktree.ID, *state.ActiveGeneration)
+}
+
+// reuseFromManifest decides whether the active generation still matches the
+// committed tree without materializing it. It reports decided=false whenever
+// the answer needs a full snapshot, which keeps the slower path authoritative.
+func (m *Manager) reuseFromManifest(ctx context.Context, target repository.Target, state State, build BuildConfig) (EnsureResult, bool, error) {
+	provider, ok := m.snapshots.(ManifestProvider)
+	if !ok {
+		return EnsureResult{}, false, nil
+	}
+	fingerprinter, ok := m.analyzer.(ManifestFingerprinter)
+	if !ok {
+		return EnsureResult{}, false, nil
+	}
+	commit := CommitSHA(target.Worktree.Head)
+	// Every cheap store-only reason to rebuild is checked before Git runs.
+	if state.Status != StatusReady || state.ActiveGeneration == nil || state.IndexedHead != commit {
+		return EnsureResult{}, false, nil
+	}
+	active, err := m.activeGeneration(ctx, target, state)
+	if err != nil {
+		return EnsureResult{}, false, nil
+	}
+	if active.State != GenerationActive || active.Commit != commit {
+		return EnsureResult{}, false, nil
+	}
+	if active.AnalyzerVersion != analyzerVersion(m.analyzer) || active.SchemaVersion != SchemaVersion {
+		return EnsureResult{}, false, nil
+	}
+	manifest, err := provider.Manifest(ctx, target.Worktree.Path, string(commit))
+	if err != nil || manifest == nil {
+		// A listing failure is not fatal: the snapshot path reports the real
+		// cause and can still rebuild.
+		return EnsureResult{}, false, nil
+	}
+	if manifest.Commit != "" && manifest.Commit != commit {
+		return EnsureResult{}, false, fmt.Errorf("manifest commit %s does not match target HEAD %s", manifest.Commit, commit)
+	}
+	fingerprint, err := fingerprinter.ManifestFingerprint(ctx, ManifestInput{
+		Repository: target.Repository.ID,
+		Worktree:   target.Worktree.ID,
+		Commit:     commit,
+		Manifest:   manifest,
+		Build:      build.Normalize(),
+	})
+	if err != nil || fingerprint == "" || active.BuildFingerprint != fingerprint {
+		return EnsureResult{}, false, nil
+	}
+	if err := m.verifyObservedTarget(ctx, target, commit); err != nil {
+		return EnsureResult{}, false, err
+	}
+	result, err := m.reuseResult(ctx, target, active)
+	if err != nil {
+		return EnsureResult{}, false, err
+	}
+	return result, true, nil
+}
+
+// reuseResult describes an untouched active generation.
+func (m *Manager) reuseResult(ctx context.Context, target repository.Target, active Generation) (EnsureResult, error) {
+	reused := EnsureResult{Generation: active, Mode: SyncModeReuse, Reason: "graph already synchronized", Reused: true}
+	counter, ok := m.store.(generationCounter)
+	if !ok {
+		return reused, nil
+	}
+	reused.Analysis = AnalysisResult{BuildFingerprint: active.BuildFingerprint, AnalyzerVersion: active.AnalyzerVersion}
+	counts, err := counter.GenerationCounts(ctx, target.Repository.ID, target.Worktree.ID, active.ID)
+	if err != nil {
+		return EnsureResult{}, fmt.Errorf("count reused graph generation: %w", err)
+	}
+	reused.Counts = counts
+	return reused, nil
 }
 
 func (m *Manager) fingerprint(ctx context.Context, input AnalyzeInput) (string, bool) {

@@ -348,3 +348,107 @@ func TestManagerDoesNotPruneWhenActivationFails(t *testing.T) {
 		t.Fatalf("failed activation pruned generations: calls=%d", store.pruneCalls)
 	}
 }
+
+// countingSnapshot records how often a tree is materialized. Materializing
+// writes every tracked file to temporary storage, so the reuse path must
+// answer from the listing alone and leave the count unchanged.
+type countingSnapshot struct {
+	t              *testing.T
+	materializings int
+	manifests      int
+}
+
+func (s *countingSnapshot) Snapshot(context.Context, string, string) (*Snapshot, error) {
+	s.materializings++
+	return NewSnapshot("/immutable-snapshot", "", nil, nil), nil
+}
+
+func (s *countingSnapshot) Manifest(_ context.Context, _, commit string) (*Manifest, error) {
+	s.manifests++
+	return &Manifest{
+		Commit: CommitSHA(commit),
+		Files:  []SnapshotFile{{Path: "main.go", BlobSHA: "blob", Mode: "100644", Size: 3}},
+		ReadFile: func(string) ([]byte, error) {
+			s.t.Helper()
+			s.t.Fatal("a reuse decision must not read file bodies")
+			return nil, nil
+		},
+	}, nil
+}
+
+// manifestTestAnalyzer answers both fingerprint questions with the same value,
+// which is the agreement the manager depends on.
+type manifestTestAnalyzer struct {
+	managerTestAnalyzer
+	fingerprints int
+}
+
+func (a *manifestTestAnalyzer) ManifestFingerprint(context.Context, ManifestInput) (string, error) {
+	a.fingerprints++
+	return "fake-fingerprint", nil
+}
+
+func newReusableManagerTarget() repository.Target {
+	return repository.Target{Repository: repository.Descriptor{ID: "repo"}, Worktree: repository.Worktree{ID: "worktree", Path: "/repo", Head: "first", HeadKnown: true}}
+}
+
+func TestManagerReusesActiveGenerationWithoutMaterializing(t *testing.T) {
+	target := newReusableManagerTarget()
+	store := newManagerTestStore(target)
+	analyzer := &manifestTestAnalyzer{}
+	snapshots := &countingSnapshot{t: t}
+	manager, err := NewManager(store, analyzer, snapshots, managerTestObserver{target: &target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build once through the ordinary path so an active generation exists.
+	built, err := manager.EnsureGraph(context.Background(), target, BuildConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.Reused {
+		t.Fatal("the first EnsureGraph reused a generation that did not exist")
+	}
+	materializedByBuild := snapshots.materializings
+	if materializedByBuild == 0 {
+		t.Fatal("building a new generation must materialize the tree")
+	}
+
+	reused, err := manager.EnsureGraph(context.Background(), target, BuildConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused.Reused || reused.Mode != SyncModeReuse {
+		t.Fatalf("second EnsureGraph result = %#v", reused)
+	}
+	if reused.Generation.ID != built.Generation.ID {
+		t.Fatalf("reused generation %v, want %v", reused.Generation.ID, built.Generation.ID)
+	}
+	if snapshots.manifests == 0 || analyzer.fingerprints == 0 {
+		t.Fatalf("reuse did not consult the manifest: manifests=%d fingerprints=%d", snapshots.manifests, analyzer.fingerprints)
+	}
+	if snapshots.materializings != materializedByBuild {
+		t.Fatalf("reuse materialized the tree %d extra times", snapshots.materializings-materializedByBuild)
+	}
+}
+
+func TestManagerRebuildStillMaterializes(t *testing.T) {
+	target := newReusableManagerTarget()
+	store := newManagerTestStore(target)
+	analyzer := &manifestTestAnalyzer{}
+	// A forced rebuild must skip the cheap path and read real source.
+	manager, err := NewManager(store, analyzer, managerTestSnapshot{}, managerTestObserver{target: &target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.EnsureGraph(context.Background(), target, BuildConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	forced, err := manager.RebuildGraph(context.Background(), target, BuildConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forced.Reused || forced.Mode != SyncModeRebuild {
+		t.Fatalf("forced rebuild result = %#v", forced)
+	}
+}

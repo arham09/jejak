@@ -58,6 +58,12 @@ test relationships roughly double a graph. Pass `--include-tests` to `init`
 and to every later command when validation targets need them; the setting is
 part of the graph fingerprint, so changing it rebuilds the graph.
 
+Inspection commands do not re-read the committed tree when the graph is
+already current. Jejak lists the tree and compares Git object identities, so
+an unchanged repository answers a query without materializing any source.
+Indexing, which does need the bytes, reads them through one batched Git
+process instead of one process per file.
+
 Jejak manages multiple repositories in one data root, with a separate graph
 for each repository and independent state for each worktree. It does not join
 or traverse graphs across repositories.
@@ -128,6 +134,12 @@ confirming the exact `repos/<repo-id>` path, or use `gc` for scoped cleanup.
 Stores written by earlier versions used a larger row layout. The first
 command against such a store migrates it: stored graphs are dropped, the file
 is compacted, and the next `init` or `sync` rebuilds the graph.
+
+The build fingerprint now identifies committed source by Git object identity
+instead of by file contents. A Git blob identifier is itself a hash of the
+exact bytes, so this describes the same source, but the recorded value
+changes. Each existing graph is therefore rebuilt once after the upgrade. The
+rebuilt graph holds the same records as before.
 
 ## Graph exports, JSON, and diagnostics
 
