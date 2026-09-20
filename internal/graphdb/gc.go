@@ -103,9 +103,12 @@ type GCReport struct {
 	DeletedTemporary    int               `json:"deleted_temporary"`
 	DeletedLogs         int               `json:"deleted_logs"`
 	ReclaimedBytes      int64             `json:"reclaimed_bytes"`
-	Candidates          []GCCandidate     `json:"candidates"`
-	Skipped             []GCSkip          `json:"skipped,omitempty"`
-	Errors              []string          `json:"errors,omitempty"`
+	// CompactedBytes is how much the database file shrank when GC rebuilt it
+	// after collection. It is zero for a dry run.
+	CompactedBytes int64         `json:"compacted_bytes"`
+	Candidates     []GCCandidate `json:"candidates"`
+	Skipped        []GCSkip      `json:"skipped,omitempty"`
+	Errors         []string      `json:"errors,omitempty"`
 }
 
 // GCSkip explains why a planned item was retained when the database changed
@@ -212,9 +215,9 @@ func (s *Store) PlanGC(ctx context.Context, repoID repository.RepoID, options GC
 	// adding it to the retention set.
 	retainedBlobs := make(map[string]struct{})
 	for _, query := range []string{
-		`SELECT blob_sha, worktree_id, generation_id FROM files WHERE repo_id=? AND blob_sha<>''`,
-		`SELECT source_blob, worktree_id, generation_id FROM nodes WHERE repo_id=? AND source_blob<>''`,
-		`SELECT source_blob, worktree_id, generation_id FROM edge_evidence WHERE repo_id=? AND source_blob<>''`,
+		`SELECT DISTINCT f.blob_sha, g.worktree_id, g.generation_id FROM files f JOIN graph_generations g ON g.generation_key=f.generation_key WHERE g.repo_id=? AND f.blob_sha<>''`,
+		`SELECT DISTINCT n.source_blob, g.worktree_id, g.generation_id FROM nodes n JOIN graph_generations g ON g.generation_key=n.generation_key WHERE g.repo_id=? AND n.source_blob<>''`,
+		`SELECT DISTINCT ev.source_blob, g.worktree_id, g.generation_id FROM edge_evidence ev JOIN edges e ON e.edge_id=ev.edge_id JOIN graph_generations g ON g.generation_key=e.generation_key WHERE g.repo_id=? AND ev.source_blob<>''`,
 	} {
 		refRows, queryErr := db.QueryContext(ctx, query, string(repoID))
 		if queryErr != nil {
@@ -385,7 +388,11 @@ func (s *Store) CollectGC(ctx context.Context, plan GCPlan) (GCReport, error) {
 					report.ReclaimedBytes += candidate.Bytes
 				}
 			case GCBlob:
-				result, err := tx.ExecContext(ctx, `DELETE FROM blobs WHERE repo_id=? AND blob_sha=? AND NOT EXISTS (SELECT 1 FROM files f WHERE f.repo_id=blobs.repo_id AND f.blob_sha=blobs.blob_sha) AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.repo_id=blobs.repo_id AND n.source_blob=blobs.blob_sha) AND NOT EXISTS (SELECT 1 FROM edge_evidence e WHERE e.repo_id=blobs.repo_id AND e.source_blob=blobs.blob_sha) AND NOT EXISTS (SELECT 1 FROM parse_cache c WHERE c.repo_id=blobs.repo_id AND c.blob_sha=blobs.blob_sha)`, string(plan.RepositoryID), candidate.BlobSHA)
+				result, err := tx.ExecContext(ctx, `DELETE FROM blobs WHERE repo_id=? AND blob_sha=?
+					AND NOT EXISTS (SELECT 1 FROM files f JOIN graph_generations g ON g.generation_key=f.generation_key WHERE g.repo_id=blobs.repo_id AND f.blob_sha=blobs.blob_sha)
+					AND NOT EXISTS (SELECT 1 FROM nodes n JOIN graph_generations g ON g.generation_key=n.generation_key WHERE g.repo_id=blobs.repo_id AND n.source_blob=blobs.blob_sha)
+					AND NOT EXISTS (SELECT 1 FROM edge_evidence ev JOIN edges e ON e.edge_id=ev.edge_id JOIN graph_generations g ON g.generation_key=e.generation_key WHERE g.repo_id=blobs.repo_id AND ev.source_blob=blobs.blob_sha)
+					AND NOT EXISTS (SELECT 1 FROM parse_cache c WHERE c.repo_id=blobs.repo_id AND c.blob_sha=blobs.blob_sha)`, string(plan.RepositoryID), candidate.BlobSHA)
 				if err != nil {
 					return GCReport{}, fmt.Errorf("collect blob %q: %w", candidate.BlobSHA, err)
 				}
@@ -427,8 +434,10 @@ func (s *Store) CollectGC(ctx context.Context, plan GCPlan) (GCReport, error) {
 	return report, nil
 }
 
-// GC computes and optionally executes one scoped cleanup operation. Callers
-// performing a mutation must hold the Store's writer lease.
+// GC computes and optionally executes one scoped cleanup operation, then
+// compacts the database file so the space freed by this and earlier
+// deletions returns to the filesystem. Callers performing a mutation must
+// hold the Store's writer lease and must not hold open views.
 func (s *Store) GC(ctx context.Context, repoID repository.RepoID, options GCOptions) (GCReport, error) {
 	plan, err := s.PlanGC(ctx, repoID, options)
 	if err != nil {
@@ -437,7 +446,16 @@ func (s *Store) GC(ctx context.Context, repoID repository.RepoID, options GCOpti
 	if options.DryRun {
 		return reportForPlan(plan, true), nil
 	}
-	return s.CollectGC(ctx, plan)
+	report, err := s.CollectGC(ctx, plan)
+	if err != nil {
+		return report, err
+	}
+	compacted, err := s.Compact(ctx)
+	if err != nil {
+		return report, fmt.Errorf("compact graph database after GC: %w", err)
+	}
+	report.CompactedBytes = compacted
+	return report, nil
 }
 
 func reportForPlan(plan GCPlan, dryRun bool) GCReport {

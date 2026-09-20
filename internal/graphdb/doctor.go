@@ -145,10 +145,10 @@ func (s *Store) Doctor(ctx context.Context, repoID repository.RepoID, worktreeID
 		report.errorIssue("schema.version_unreadable", "schema", fmt.Sprintf("read schema version: %v", versionErr))
 	} else {
 		report.SchemaVersion = version
-		if version > defaultSchema {
-			report.errorIssue("schema.future", "schema", fmt.Sprintf("schema version %d is newer than supported version %d", version, defaultSchema))
-		} else if version < defaultSchema {
-			report.warningIssue("schema.pending", "schema", fmt.Sprintf("schema version %d is older than supported version %d; run init or sync to migrate", version, defaultSchema))
+		if version > latestMigration {
+			report.errorIssue("schema.future", "schema", fmt.Sprintf("schema version %d is newer than supported version %d", version, latestMigration))
+		} else if version < latestMigration {
+			report.warningIssue("schema.pending", "schema", fmt.Sprintf("schema version %d is older than supported version %d; run init or sync to migrate", version, latestMigration))
 		}
 	}
 
@@ -315,26 +315,30 @@ func (r *DoctorReport) checkGlobalGraph(ctx context.Context, db *sql.DB) {
 }
 
 func (r *DoctorReport) checkSelectedGraphRows(ctx context.Context, db *sql.DB, repoID repository.RepoID, worktreeID repository.WorktreeID, generationID graph.GenerationID) {
+	// scope selects the integer keys of the inspected generations. Every
+	// check below binds it exactly once, so all checks share one argument
+	// list.
 	args := []any{string(repoID), string(worktreeID)}
-	genClause := ""
+	scope := `(SELECT generation_key FROM graph_generations WHERE repo_id = ? AND worktree_id = ?`
 	if generationID > 0 {
-		genClause = " AND generation_id = ?"
+		scope += ` AND generation_id = ?`
 		args = append(args, int64(generationID))
 	}
+	scope += `)`
 	checks := []struct {
 		name   string
 		code   string
 		detail string
 		query  string
 	}{
-		{"graph.edge_endpoints", "graph.edge_endpoints", "all edges reference nodes in the same generation", `SELECT COUNT(*) FROM edges e WHERE e.repo_id = ? AND e.worktree_id = ?` + genClause + ` AND (NOT EXISTS (SELECT 1 FROM nodes n WHERE n.repo_id=e.repo_id AND n.worktree_id=e.worktree_id AND n.generation_id=e.generation_id AND n.node_key=e.source_key) OR NOT EXISTS (SELECT 1 FROM nodes n WHERE n.repo_id=e.repo_id AND n.worktree_id=e.worktree_id AND n.generation_id=e.generation_id AND n.node_key=e.target_key))`},
-		{"graph.file_blobs", "graph.file_blobs", "all file blobs have repository provenance", `SELECT COUNT(*) FROM files f WHERE f.repo_id = ? AND f.worktree_id = ?` + genClause + ` AND f.blob_sha <> '' AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.repo_id=f.repo_id AND b.blob_sha=f.blob_sha)`},
-		{"graph.symbol_ownership", "graph.symbol_ownership", "all symbols reference a package and file in the same generation", `SELECT COUNT(*) FROM symbols s WHERE s.repo_id = ? AND s.worktree_id = ?` + genClause + ` AND (NOT EXISTS (SELECT 1 FROM packages p WHERE p.repo_id=s.repo_id AND p.worktree_id=s.worktree_id AND p.generation_id=s.generation_id AND p.package_key=s.package_key) OR NOT EXISTS (SELECT 1 FROM files f WHERE f.repo_id=s.repo_id AND f.worktree_id=s.worktree_id AND f.generation_id=s.generation_id AND f.file_key=s.file_key))`},
-		{"graph.node_ownership", "graph.node_ownership", "owned nodes reference existing package/file/symbol records", `SELECT COUNT(*) FROM nodes n WHERE n.repo_id = ? AND n.worktree_id = ?` + genClause + ` AND ((n.owned=1 AND n.package_key<>'' AND NOT EXISTS (SELECT 1 FROM packages p WHERE p.repo_id=n.repo_id AND p.worktree_id=n.worktree_id AND p.generation_id=n.generation_id AND p.package_key=n.package_key)) OR (n.owned=1 AND n.file_key<>'' AND NOT EXISTS (SELECT 1 FROM files f WHERE f.repo_id=n.repo_id AND f.worktree_id=n.worktree_id AND f.generation_id=n.generation_id AND f.file_key=n.file_key)) OR (n.owned=1 AND n.symbol_key<>'' AND NOT EXISTS (SELECT 1 FROM symbols s WHERE s.repo_id=n.repo_id AND s.worktree_id=n.worktree_id AND s.generation_id=n.generation_id AND s.symbol_key=n.symbol_key)))`},
-		{"graph.evidence", "graph.evidence", "edge evidence references an existing edge and blob", `SELECT COUNT(*) FROM edge_evidence e WHERE e.repo_id = ? AND e.worktree_id = ?` + genClause + ` AND (NOT EXISTS (SELECT 1 FROM edges x WHERE x.repo_id=e.repo_id AND x.worktree_id=e.worktree_id AND x.generation_id=e.generation_id AND x.source_key=e.source_key AND x.target_key=e.target_key AND x.edge_kind=e.edge_kind) OR (e.source_blob<>'' AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.repo_id=e.repo_id AND b.blob_sha=e.source_blob)))`},
-		{"graph.package_dependencies", "graph.package_dependencies", "package dependency sources exist and external targets are labelled", `SELECT COUNT(*) FROM package_dependencies d WHERE d.repo_id = ? AND d.worktree_id = ?` + genClause + ` AND (NOT EXISTS (SELECT 1 FROM packages p WHERE p.repo_id=d.repo_id AND p.worktree_id=d.worktree_id AND p.generation_id=d.generation_id AND p.package_key=d.source_package) OR (d.target_package NOT LIKE 'external:package:%' AND NOT EXISTS (SELECT 1 FROM packages p WHERE p.repo_id=d.repo_id AND p.worktree_id=d.worktree_id AND p.generation_id=d.generation_id AND p.package_key=d.target_package)))`},
-		{"graph.test_relationships", "graph.test_relationships", "test relationships reference test symbols and valid targets", `SELECT COUNT(*) FROM test_relationships t WHERE t.repo_id = ? AND t.worktree_id = ?` + genClause + ` AND (NOT EXISTS (SELECT 1 FROM symbols s WHERE s.repo_id=t.repo_id AND s.worktree_id=t.worktree_id AND s.generation_id=t.generation_id AND s.symbol_key=t.test_key) OR (NOT EXISTS (SELECT 1 FROM symbols s WHERE s.repo_id=t.repo_id AND s.worktree_id=t.worktree_id AND s.generation_id=t.generation_id AND s.symbol_key=t.target_key) AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.repo_id=t.repo_id AND n.worktree_id=t.worktree_id AND n.generation_id=t.generation_id AND n.node_key=t.target_key AND n.node_kind='package')))`},
-		{"graph.duplicate_edges", "graph.duplicate_edges", "active semantic edges are normalized", `SELECT COUNT(*) FROM (SELECT repo_id, worktree_id, generation_id, source_key, target_key, edge_kind, COUNT(*) AS duplicate_count FROM edges WHERE repo_id = ? AND worktree_id = ?` + genClause + ` GROUP BY repo_id, worktree_id, generation_id, source_key, target_key, edge_kind HAVING COUNT(*) > 1)`},
+		{"graph.edge_endpoints", "graph.edge_endpoints", "all edges reference nodes in the same generation", `SELECT COUNT(*) FROM edges e WHERE e.generation_key IN ` + scope + ` AND (NOT EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=e.source_id AND n.generation_key=e.generation_key) OR NOT EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=e.target_id AND n.generation_key=e.generation_key))`},
+		{"graph.file_blobs", "graph.file_blobs", "all file blobs have repository provenance", `SELECT COUNT(*) FROM files f JOIN graph_generations g ON g.generation_key=f.generation_key WHERE f.generation_key IN ` + scope + ` AND f.blob_sha <> '' AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.repo_id=g.repo_id AND b.blob_sha=f.blob_sha)`},
+		{"graph.symbol_ownership", "graph.symbol_ownership", "all symbols reference a package and file in the same generation", `SELECT COUNT(*) FROM symbols s WHERE s.generation_key IN ` + scope + ` AND (NOT EXISTS (SELECT 1 FROM packages p WHERE p.generation_key=s.generation_key AND p.package_key=s.package_key) OR NOT EXISTS (SELECT 1 FROM files f WHERE f.generation_key=s.generation_key AND f.file_key=s.file_key))`},
+		{"graph.node_ownership", "graph.node_ownership", "owned nodes reference existing package/file/symbol records", `SELECT COUNT(*) FROM nodes n WHERE n.generation_key IN ` + scope + ` AND ((n.owned=1 AND n.package_key<>'' AND NOT EXISTS (SELECT 1 FROM packages p WHERE p.generation_key=n.generation_key AND p.package_key=n.package_key)) OR (n.owned=1 AND n.file_key<>'' AND NOT EXISTS (SELECT 1 FROM files f WHERE f.generation_key=n.generation_key AND f.file_key=n.file_key)) OR (n.owned=1 AND n.symbol_key<>'' AND NOT EXISTS (SELECT 1 FROM symbols s WHERE s.generation_key=n.generation_key AND s.symbol_key=n.symbol_key)))`},
+		{"graph.evidence", "graph.evidence", "edge evidence references an existing edge and blob", `SELECT (SELECT COUNT(*) FROM edge_evidence ev WHERE NOT EXISTS (SELECT 1 FROM edges x WHERE x.edge_id=ev.edge_id)) + (SELECT COUNT(*) FROM edge_evidence ev JOIN edges x ON x.edge_id=ev.edge_id JOIN graph_generations g ON g.generation_key=x.generation_key WHERE x.generation_key IN ` + scope + ` AND ev.source_blob<>'' AND NOT EXISTS (SELECT 1 FROM blobs b WHERE b.repo_id=g.repo_id AND b.blob_sha=ev.source_blob))`},
+		{"graph.package_dependencies", "graph.package_dependencies", "package dependency sources exist and external targets are labelled", `SELECT COUNT(*) FROM package_dependencies d WHERE d.generation_key IN ` + scope + ` AND (NOT EXISTS (SELECT 1 FROM packages p WHERE p.generation_key=d.generation_key AND p.package_key=d.source_package) OR (d.target_package NOT LIKE 'external:package:%' AND NOT EXISTS (SELECT 1 FROM packages p WHERE p.generation_key=d.generation_key AND p.package_key=d.target_package)))`},
+		{"graph.test_relationships", "graph.test_relationships", "test relationships reference test symbols and valid targets", `SELECT COUNT(*) FROM test_relationships t WHERE t.generation_key IN ` + scope + ` AND (NOT EXISTS (SELECT 1 FROM symbols s WHERE s.generation_key=t.generation_key AND s.symbol_key=t.test_key) OR (NOT EXISTS (SELECT 1 FROM symbols s WHERE s.generation_key=t.generation_key AND s.symbol_key=t.target_key) AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.generation_key=t.generation_key AND n.node_key=t.target_key AND n.node_kind='package')))`},
+		{"graph.duplicate_edges", "graph.duplicate_edges", "active semantic edges are normalized", `SELECT COUNT(*) FROM (SELECT generation_key, source_id, target_id, edge_kind, COUNT(*) AS duplicate_count FROM edges WHERE generation_key IN ` + scope + ` GROUP BY generation_key, source_id, target_id, edge_kind HAVING COUNT(*) > 1)`},
 	}
 	for _, check := range checks {
 		count, err := countQuery(ctx, db, check.query, args...)
@@ -436,12 +440,11 @@ func readGenerationWithoutValidation(ctx context.Context, db *sql.DB, repoID rep
 }
 
 func generationCounts(ctx context.Context, db *sql.DB, repoID repository.RepoID, worktreeID repository.WorktreeID, generationID graph.GenerationID) (graph.Counts, error) {
-	var counts graph.Counts
-	err := db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM packages WHERE repo_id=? AND worktree_id=? AND generation_id=?), (SELECT COUNT(*) FROM files WHERE repo_id=? AND worktree_id=? AND generation_id=?), (SELECT COUNT(*) FROM symbols WHERE repo_id=? AND worktree_id=? AND generation_id=?), (SELECT COUNT(*) FROM edges WHERE repo_id=? AND worktree_id=? AND generation_id=?), (SELECT COUNT(*) FROM symbols WHERE repo_id=? AND worktree_id=? AND generation_id=? AND node_kind=?)`, string(repoID), string(worktreeID), int64(generationID), string(repoID), string(worktreeID), int64(generationID), string(repoID), string(worktreeID), int64(generationID), string(repoID), string(worktreeID), int64(generationID), string(repoID), string(worktreeID), int64(generationID), string(graph.NodeTest)).Scan(&counts.Packages, &counts.Files, &counts.Symbols, &counts.Edges, &counts.Tests)
+	key, _, err := generationRef(ctx, db, repoID, worktreeID, generationID)
 	if err != nil {
 		return graph.Counts{}, err
 	}
-	return counts, nil
+	return countGeneration(ctx, db, key)
 }
 
 // GenerationFileBlobSHAs returns the distinct Git blob IDs used by source
@@ -454,10 +457,11 @@ func (s *Store) GenerationFileBlobSHAs(ctx context.Context, repoID repository.Re
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT DISTINCT blob_sha
-		FROM files
-		WHERE repo_id = ? AND worktree_id = ? AND generation_id = ? AND blob_sha <> ''
-		ORDER BY blob_sha
+		SELECT DISTINCT f.blob_sha
+		FROM files AS f
+		JOIN graph_generations AS g ON g.generation_key = f.generation_key
+		WHERE g.repo_id = ? AND g.worktree_id = ? AND g.generation_id = ? AND f.blob_sha <> ''
+		ORDER BY f.blob_sha
 	`, string(repoID), string(worktreeID), int64(generationID))
 	if err != nil {
 		return nil, fmt.Errorf("list generation file blobs: %w", err)

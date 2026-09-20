@@ -37,6 +37,9 @@ type Options struct {
 	GOOS       string
 	GOARCH     string
 	CGOEnabled string
+	// IncludeTests indexes _test.go package variants and test relationships.
+	// They are excluded by default because they roughly double the graph.
+	IncludeTests bool
 }
 
 type snapshotProvider struct {

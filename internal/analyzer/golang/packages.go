@@ -112,7 +112,10 @@ func (a *Analyzer) load(ctx context.Context, input graph.AnalyzeInput, plan load
 			packages.NeedImports | packages.NeedDeps | packages.NeedTypes |
 			packages.NeedTypesInfo | packages.NeedTypesSizes | packages.NeedSyntax |
 			packages.NeedModule | packages.NeedForTest | packages.NeedEmbedFiles,
-		Tests: true,
+		// Test variants roughly double the loaded packages and the graph they
+		// produce, so they are loaded only on request. Without them no
+		// _test.go file is parsed and no test symbol or relationship exists.
+		Tests: input.Build.IncludeTests,
 	}
 	patterns := make([]string, 0, len(plan.ModuleRoots))
 	for _, module := range plan.ModuleRoots {
@@ -283,7 +286,7 @@ func (a *Analyzer) fingerprint(ctx context.Context, input graph.AnalyzeInput, pl
 		[]byte(effectiveValue(build.GOARCH, os.Getenv("GOARCH"), runtime.GOARCH)),
 		[]byte(effectiveValue(build.CGOEnabled, os.Getenv("CGO_ENABLED"), "")),
 		[]byte(strings.Join(build.Tags, ",")),
-		[]byte(fmt.Sprintf("download=%t;workspace=%t", build.DownloadDependencies, plan.Workspace)),
+		[]byte(fmt.Sprintf("download=%t;workspace=%t;tests=%t", build.DownloadDependencies, plan.Workspace, build.IncludeTests)),
 		[]byte(sanitizeGoFlags(os.Getenv("GOFLAGS"))),
 		[]byte(os.Getenv("GOPROXY")),
 	}

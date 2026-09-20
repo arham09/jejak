@@ -43,10 +43,14 @@ func TestDoctorDetectsGenerationProvenanceAndOwnershipFaults(t *testing.T) {
 	if err := store.ActivateGeneration(ctx, target.Repository.ID, target.Worktree.ID, generation.ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`INSERT INTO files(repo_id, worktree_id, generation_id, file_key, path, blob_sha, package_key) VALUES (?, ?, ?, 'file:missing', 'missing.go', 'missing-blob', '')`, string(target.Repository.ID), string(target.Worktree.ID), int64(generation.ID)); err != nil {
+	key, _, err := generationRef(ctx, store.db, target.Repository.ID, target.Worktree.ID, generation.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE files SET blob_sha = 'missing-blob' WHERE repo_id = ? AND worktree_id = ? AND generation_id = ?`, string(target.Repository.ID), string(target.Worktree.ID), int64(generation.ID)); err != nil {
+	if _, err := store.db.Exec(`INSERT INTO files(generation_key, file_key, path, blob_sha, package_key) VALUES (?, 'file:missing', 'missing.go', 'missing-blob', '')`, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE files SET blob_sha = 'missing-blob' WHERE generation_key = ?`, key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`UPDATE graph_state SET indexed_head = 'wrong-head' WHERE repo_id = ? AND worktree_id = ?`, string(target.Repository.ID), string(target.Worktree.ID)); err != nil {

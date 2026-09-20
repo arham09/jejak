@@ -88,5 +88,5 @@ func (a *App) ensureCommand(ctx context.Context, options Options, forceRebuild b
 }
 
 func buildConfig(options Options) graph.BuildConfig {
-	return graph.BuildConfig{GOOS: options.GOOS, GOARCH: options.GOARCH, CGOEnabled: options.CGOEnabled, Tags: options.Tags, DownloadDependencies: options.DownloadDependencies}
+	return graph.BuildConfig{GOOS: options.GOOS, GOARCH: options.GOARCH, CGOEnabled: options.CGOEnabled, Tags: options.Tags, DownloadDependencies: options.DownloadDependencies, IncludeTests: options.IncludeTests}
 }

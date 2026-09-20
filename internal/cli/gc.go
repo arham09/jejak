@@ -125,6 +125,9 @@ func renderGCText(output io.Writer, target repository.Target, report graphdb.GCR
 	fmt.Fprintf(output, "Planned     %d item(s)\n", report.PlannedItems)
 	fmt.Fprintf(output, "Deleted     %d item(s)\n", report.DeletedItems)
 	fmt.Fprintf(output, "Reclaimed   %d bytes\n", report.ReclaimedBytes)
+	if !report.DryRun {
+		fmt.Fprintf(output, "Compacted   %d bytes returned to the filesystem\n", report.CompactedBytes)
+	}
 	if report.DeletedItems > 0 {
 		fmt.Fprintf(output, "  generations %d  parse-cache %d  blobs %d  temporary %d  logs %d\n", report.DeletedGenerations, report.DeletedParseCache, report.DeletedBlobs, report.DeletedTemporary, report.DeletedLogs)
 	}

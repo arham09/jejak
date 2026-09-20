@@ -16,9 +16,12 @@ import (
 type View struct {
 	tx         *sql.Tx
 	generation graph.Generation
-	release    func()
-	closeOnce  sync.Once
-	closeErr   error
+	// key is the generation's integer storage key; every generation-scoped
+	// query binds it instead of the repository/worktree/generation triple.
+	key       int64
+	release   func()
+	closeOnce sync.Once
+	closeErr  error
 }
 
 var _ graph.QueryView = (*View)(nil)
@@ -36,7 +39,7 @@ func (s *Store) OpenView(ctx context.Context, repoID repository.RepoID, worktree
 	if err != nil {
 		return nil, fmt.Errorf("begin graph view: %w", err)
 	}
-	generation, err := scanGeneration(ctx, tx, repoID, worktreeID, id)
+	generation, key, err := scanGeneration(ctx, tx, repoID, worktreeID, id)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -58,47 +61,49 @@ func (s *Store) OpenView(ctx context.Context, repoID repository.RepoID, worktree
 	return &View{
 		tx:         tx,
 		generation: generation,
+		key:        key,
 		release: func() {
 			s.releaseReader(repoID, worktreeID, id)
 		},
 	}, nil
 }
 
-func scanGeneration(ctx context.Context, tx *sql.Tx, repoID repository.RepoID, worktreeID repository.WorktreeID, id graph.GenerationID) (graph.Generation, error) {
+func scanGeneration(ctx context.Context, tx *sql.Tx, repoID repository.RepoID, worktreeID repository.WorktreeID, id graph.GenerationID) (graph.Generation, int64, error) {
 	var commit, fingerprint, analyzerVersion, state, message, created, validated, retired string
 	var schema int
+	var key int64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT commit_sha, build_fingerprint, analyzer_version, schema_version,
+		SELECT generation_key, commit_sha, build_fingerprint, analyzer_version, schema_version,
 		       state, error, created_at, COALESCE(validated_at, ''), COALESCE(retired_at, '')
 		FROM graph_generations
 		WHERE repo_id = ? AND worktree_id = ? AND generation_id = ?
-	`, string(repoID), string(worktreeID), int64(id)).Scan(&commit, &fingerprint, &analyzerVersion, &schema, &state, &message, &created, &validated, &retired); err != nil {
+	`, string(repoID), string(worktreeID), int64(id)).Scan(&key, &commit, &fingerprint, &analyzerVersion, &schema, &state, &message, &created, &validated, &retired); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return graph.Generation{}, fmt.Errorf("%w: generation %d", ErrNotFound, id)
+			return graph.Generation{}, 0, fmt.Errorf("%w: generation %d", ErrNotFound, id)
 		}
-		return graph.Generation{}, fmt.Errorf("read graph view generation %d: %w", id, err)
+		return graph.Generation{}, 0, fmt.Errorf("read graph view generation %d: %w", id, err)
 	}
 	generation := graph.Generation{RepoID: repoID, WorktreeID: worktreeID, ID: id, Commit: graph.CommitSHA(commit), BuildFingerprint: fingerprint, AnalyzerVersion: analyzerVersion, SchemaVersion: schema, State: graph.GenerationState(state), Error: message}
 	createdAt, err := parseTimestamp(created)
 	if err != nil {
-		return graph.Generation{}, fmt.Errorf("parse graph view creation time: %w", err)
+		return graph.Generation{}, 0, fmt.Errorf("parse graph view creation time: %w", err)
 	}
 	generation.CreatedAt = createdAt
 	if validated != "" {
 		value, parseErr := parseTimestamp(validated)
 		if parseErr != nil {
-			return graph.Generation{}, fmt.Errorf("parse graph view validation time: %w", parseErr)
+			return graph.Generation{}, 0, fmt.Errorf("parse graph view validation time: %w", parseErr)
 		}
 		generation.ValidatedAt = &value
 	}
 	if retired != "" {
 		value, parseErr := parseTimestamp(retired)
 		if parseErr != nil {
-			return graph.Generation{}, fmt.Errorf("parse graph view retirement time: %w", parseErr)
+			return graph.Generation{}, 0, fmt.Errorf("parse graph view retirement time: %w", parseErr)
 		}
 		generation.RetiredAt = &value
 	}
-	return generation, nil
+	return generation, key, nil
 }
 
 // Generation returns the generation pinned by this view.

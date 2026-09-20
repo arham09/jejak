@@ -20,7 +20,15 @@ import (
 
 const (
 	defaultBusyTimeout = 5 * time.Second
-	defaultSchema      = 1
+	// defaultSchema is the record format written into graph_state and
+	// graph_generations. It follows graph.SchemaVersion, which is bumped only
+	// when stored records change shape, because a bump invalidates every
+	// existing generation.
+	defaultSchema = graph.SchemaVersion
+	// latestMigration is the newest embedded migration version. Migrations
+	// that only add indexes or other non-record structures bump this alone
+	// and leave stored generations valid.
+	latestMigration = 3
 )
 
 // Store is a concrete SQLite store for one repository database. Callers must

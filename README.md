@@ -52,6 +52,11 @@ dependent commands analyze the selected committed HEAD; inspection commands
 also provide a command-scoped working-tree overlay by default. Pass
 `--committed` to inspect only the durable committed graph.
 
+Test packages are not indexed by default: `_test.go` files, test symbols, and
+test relationships roughly double a graph. Pass `--include-tests` to `init`
+and to every later command when validation targets need them; the setting is
+part of the graph fingerprint, so changing it rebuilds the graph.
+
 Jejak manages multiple repositories in one data root, with a separate graph
 for each repository and independent state for each worktree. It does not join
 or traverse graphs across repositories.
@@ -93,10 +98,18 @@ jejak gc                     # collect obsolete generations/cache/temp/log data
 `doctor --repair` preserves the previous database and SQLite sidecars in a
 private timestamped quarantine directory before rebuilding through the normal
 validated activation path. A failed repair leaves the quarantine evidence and
-never promotes an incomplete graph. `gc` retains active generations, recent
-history, and open in-process readers; it only removes Jejak-owned data below
+never promotes an incomplete graph.
+
+Every successful `init`, `sync`, or `rebuild` replaces the worktree's previous
+generation once the new one is active, so a store holds one committed graph
+per worktree and running `init` twice does not add a second copy. `gc` removes
+what that retention leaves behind: failed or interrupted generations, parse
+cache and blob rows that no retained generation references, and aged
+temporary/log entries. It then compacts the database file so freed pages
+return to the filesystem. `gc` never removes an active generation or one
+with an open in-process reader, and it only touches Jejak-owned data below
 the selected repository store. Use `--keep-generations N` and
-`--older-than 24h` to tune retention and aged temporary/log cleanup.
+`--older-than 24h` to tune what it keeps.
 
 ## Storage and privacy
 
@@ -106,8 +119,14 @@ directory (`~/.local/share/jejak` on Linux and
 `repos/<repo-id>/graph.db` with private directory/file permissions. A custom
 `--data-dir` or `JEJAK_DATA_DIR` is accepted only when it is outside the source
 repository. SQLite uses WAL mode; parse cache and temporary snapshots are
-rebuildable. Remove a repository store only after confirming the exact
-`repos/<repo-id>` path, or use `gc` for scoped cleanup.
+rebuildable. A committed graph of a mid-size Go service (about 150 files and
+30,000 relationships) takes roughly 15 MB per worktree without test packages
+and about three times that with them. Remove a repository store only after
+confirming the exact `repos/<repo-id>` path, or use `gc` for scoped cleanup.
+
+Stores written by earlier versions used a larger row layout. The first
+command against such a store migrates it: stored graphs are dropped, the file
+is compacted, and the next `init` or `sync` rebuilds the graph.
 
 ## Graph exports, JSON, and diagnostics
 

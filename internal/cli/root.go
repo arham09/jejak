@@ -49,6 +49,8 @@ func parseCommandOptions(options Options, args []string) (Options, []string, err
 		switch {
 		case arg == "--download-deps" || arg == "--download-dependencies":
 			options.DownloadDependencies = true
+		case arg == "--include-tests":
+			options.IncludeTests = true
 		case arg == "--quiet" || arg == "-q":
 			options.Quiet = true
 		case arg == "--no-hooks":
@@ -183,6 +185,8 @@ func parseArgs(args []string) (Options, string, []string, error) {
 			options.DataDir = strings.TrimPrefix(arg, "--data-dir=")
 		case arg == "--download-deps" || arg == "--download-dependencies":
 			options.DownloadDependencies = true
+		case arg == "--include-tests":
+			options.IncludeTests = true
 		case arg == "--quiet" || arg == "-q":
 			options.Quiet = true
 		case arg == "--no-hooks":
@@ -268,6 +272,7 @@ Global options:
   -C, --worktree <path>  resolve the target from a worktree path
       --data-dir <path>  override the external Jejak data root
       --download-deps     explicitly allow missing Go dependencies to download
+      --include-tests     also index _test.go packages and test relationships
   -q, --quiet             suppress successful synchronization output
       --json              render agent-facing reports (and graph queries) as versioned JSON
       --committed         inspect only the durable committed graph

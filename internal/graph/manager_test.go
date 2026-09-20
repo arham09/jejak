@@ -59,6 +59,13 @@ func (s *managerTestStore) ActivateGeneration(_ context.Context, _ repository.Re
 	if expected != nil && (s.state.ActiveGeneration == nil || *s.state.ActiveGeneration != *expected) {
 		return errors.New("stale generation")
 	}
+	if s.state.ActiveGeneration != nil && *s.state.ActiveGeneration != id {
+		// Mirror the real store: the replaced generation is retired in the
+		// same activation, which is what pruning later removes.
+		previous := s.generations[*s.state.ActiveGeneration]
+		previous.State = GenerationRetired
+		s.generations[*s.state.ActiveGeneration] = previous
+	}
 	generation := s.generations[id]
 	generation.State = GenerationActive
 	s.generations[id] = generation
@@ -268,5 +275,76 @@ func TestManagerSuppliesSyntaxCacheHitsBeforeProducingSummaries(t *testing.T) {
 	}
 	if len(store.writes) != 1 || store.writes[0].BlobSHA != "miss" {
 		t.Fatalf("cache writes = %#v", store.writes)
+	}
+}
+
+// managerPruningStore records pruning requests so the test can assert the
+// manager prunes only after a generation became active.
+type managerPruningStore struct {
+	*managerTestStore
+	pruneCalls int
+}
+
+func (s *managerPruningStore) PruneGenerations(_ context.Context, _ repository.RepoID, _ repository.WorktreeID) (int, error) {
+	s.pruneCalls++
+	pruned := 0
+	for id, generation := range s.generations {
+		if generation.State != GenerationActive {
+			delete(s.generations, id)
+			delete(s.analyses, id)
+			pruned++
+		}
+	}
+	return pruned, nil
+}
+
+func TestManagerPrunesSupersededGenerationsAfterActivation(t *testing.T) {
+	target := repository.Target{Repository: repository.Descriptor{ID: "repo"}, Worktree: repository.Worktree{ID: "worktree", Path: "/repo", Head: "first", HeadKnown: true}}
+	store := &managerPruningStore{managerTestStore: newManagerTestStore(target)}
+	analyzer := &managerTestAnalyzer{}
+	manager, err := NewManagerWithOptions(store, analyzer, managerTestSnapshot{}, managerTestObserver{target: &target}, ManagerOptions{Diff: managerTestDiff{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := manager.EnsureGraph(context.Background(), target, BuildConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.pruneCalls != 1 || first.PrunedGenerations != 0 {
+		t.Fatalf("first ensure prune calls=%d pruned=%d, want 1 call removing nothing", store.pruneCalls, first.PrunedGenerations)
+	}
+	if reused, err := manager.EnsureGraph(context.Background(), target, BuildConfig{}); err != nil || !reused.Reused || store.pruneCalls != 1 {
+		t.Fatalf("reuse must not prune: result=%#v err=%v calls=%d", reused, err, store.pruneCalls)
+	}
+	target.Worktree.Head = "second"
+	second, err := manager.EnsureGraph(context.Background(), target, BuildConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.pruneCalls != 2 || second.PrunedGenerations != 1 {
+		t.Fatalf("second ensure prune calls=%d pruned=%d, want the first generation pruned", store.pruneCalls, second.PrunedGenerations)
+	}
+	if len(store.generations) != 1 {
+		t.Fatalf("generations after pruning = %d, want 1", len(store.generations))
+	}
+	if _, ok := store.generations[second.Generation.ID]; !ok {
+		t.Fatalf("active generation %d was pruned", second.Generation.ID)
+	}
+}
+
+func TestManagerDoesNotPruneWhenActivationFails(t *testing.T) {
+	target := repository.Target{Repository: repository.Descriptor{ID: "repo"}, Worktree: repository.Worktree{ID: "worktree", Path: "/repo", Head: "first", HeadKnown: true}}
+	store := &managerPruningStore{managerTestStore: newManagerTestStore(target)}
+	moved := target
+	moved.Worktree.Head = "moved"
+	manager, err := NewManagerWithOptions(store, &managerTestAnalyzer{}, managerTestSnapshot{}, managerTestObserver{target: &moved}, ManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.EnsureGraph(context.Background(), target, BuildConfig{}); !errors.Is(err, ErrStaleState) {
+		t.Fatalf("ensure with moved HEAD error = %v, want ErrStaleState", err)
+	}
+	if store.pruneCalls != 0 {
+		t.Fatalf("failed activation pruned generations: calls=%d", store.pruneCalls)
 	}
 }

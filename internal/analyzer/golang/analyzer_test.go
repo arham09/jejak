@@ -465,7 +465,9 @@ func snapshotInput(t *testing.T, root, commit string) (graph.AnalyzeInput, func(
 	for _, file := range snapshot.Files {
 		files = append(files, graph.SnapshotFile{Path: file.Path, BlobSHA: file.BlobSHA, ObjectFormat: file.ObjectFormat, Mode: file.Mode, Size: file.Size})
 	}
-	input := graph.AnalyzeInput{Repository: target.Repository.ID, Worktree: target.Worktree.ID, Commit: graph.CommitSHA(commit), Root: snapshot.Root, Files: files}
+	// The fixtures exercise test-variant extraction, so they opt into the
+	// test packages that production indexing leaves out by default.
+	input := graph.AnalyzeInput{Repository: target.Repository.ID, Worktree: target.Worktree.ID, Commit: graph.CommitSHA(commit), Root: snapshot.Root, Files: files, Build: graph.BuildConfig{IncludeTests: true}}
 	return input, func() { _ = snapshot.Close() }
 }
 
@@ -698,4 +700,56 @@ func moduleZip(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return contents.Bytes()
+}
+
+func TestAnalyzeExcludesTestPackagesUnlessRequested(t *testing.T) {
+	repo := testrepo.New(t)
+	repo.Write(t, "go.mod", "module example.com/notests\n\ngo 1.27\n")
+	repo.Write(t, "main.go", "package notests\n\nfunc Answer() int { return 42 }\n")
+	repo.Write(t, "main_test.go", "package notests\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) { if Answer() != 42 { t.Fatal(\"bad\") } }\n")
+	repo.Write(t, "external_test.go", "package notests_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/notests\"\n)\n\nfunc TestExternal(t *testing.T) { if notests.Answer() != 42 { t.Fatal(\"bad\") } }\n")
+	commit := repo.Commit(t, "initial")
+	input, cleanup := snapshotInput(t, repo.Root, commit)
+	defer cleanup()
+	input.Build = graph.BuildConfig{}
+	result, err := New().Analyze(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if result.HasErrors() {
+		t.Fatalf("Analyze() diagnostics = %#v", result.Diagnostics)
+	}
+	if len(result.Packages) != 1 || result.Packages[0].Variant != "production" {
+		t.Fatalf("packages without tests = %#v, want the production package only", result.Packages)
+	}
+	for _, file := range result.Files {
+		if file.IsTest || strings.HasSuffix(file.Path, "_test.go") {
+			t.Fatalf("test file indexed without --include-tests: %#v", file)
+		}
+	}
+	if result.Count().Tests != 0 || len(result.TestRelationships) != 0 || hasEdge(result.Edges, graph.EdgeTests) {
+		t.Fatalf("test facts recorded without --include-tests: tests=%d relationships=%#v", result.Count().Tests, result.TestRelationships)
+	}
+	if symbolKeyByName(result.Symbols, "Answer") == "" {
+		t.Fatalf("production symbol missing: %#v", result.Symbols)
+	}
+	excludedFingerprint, err := New().BuildFingerprint(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Build = graph.BuildConfig{IncludeTests: true}
+	includedFingerprint, err := New().BuildFingerprint(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excludedFingerprint == includedFingerprint {
+		t.Fatal("build fingerprint ignores test inclusion, so toggling it would reuse a stale graph")
+	}
+	included, err := New().Analyze(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if included.Count().Tests != 2 || len(included.Packages) < 3 {
+		t.Fatalf("tests included: count=%d packages=%#v", included.Count().Tests, included.Packages)
+	}
 }

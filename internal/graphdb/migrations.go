@@ -2,6 +2,7 @@ package graphdb
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -20,9 +21,17 @@ var migrationFiles embed.FS
 
 // Migrate applies pending schema migrations. Callers should hold the
 // repository writer lock while invoking it.
+//
+// A brand-new file is switched to incremental auto-vacuum before its first
+// table exists, so pruned generations can later return their pages to the
+// filesystem. After a migration that freed pages, for example one that drops
+// and recreates graph tables, the file is compacted once.
 func (s *Store) Migrate(ctx context.Context) error {
 	db, err := s.database()
 	if err != nil {
+		return err
+	}
+	if err := prepareEmptyDatabase(ctx, db); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -42,7 +51,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
 		return fmt.Errorf("read current graph schema version: %w", err)
 	}
-	if current >= defaultSchema {
+	if current > 0 {
 		var domainTables int
 		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM sqlite_master
@@ -81,6 +90,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if current > maxVersion {
 		return fmt.Errorf("graph schema version %d is newer than this binary supports (latest %d)", current, maxVersion)
 	}
+	applied := false
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sql" {
 			continue
@@ -103,9 +113,49 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record graph migration %q: %w", entry.Name(), err)
 		}
 		current = version
+		applied = true
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit graph schema migration: %w", err)
+	}
+	if applied {
+		if err := s.compactAfterMigration(ctx, db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prepareEmptyDatabase enables incremental auto-vacuum on a file that has no
+// tables yet. SQLite only accepts the change before the first table exists
+// or through a full VACUUM, so this is the cheap moment to make it.
+func prepareEmptyDatabase(ctx context.Context, db *sql.DB) error {
+	var tables int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'`).Scan(&tables); err != nil {
+		return fmt.Errorf("inspect graph schema before migration: %w", err)
+	}
+	if tables > 0 {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
+		return fmt.Errorf("enable incremental auto-vacuum: %w", err)
+	}
+	return nil
+}
+
+// compactAfterMigration rebuilds the file when a migration left free pages
+// behind, which happens when a migration drops tables. Migrations that only
+// add structure leave nothing to reclaim and skip the rebuild.
+func (s *Store) compactAfterMigration(ctx context.Context, db *sql.DB) error {
+	var freePages int64
+	if err := db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freePages); err != nil {
+		return fmt.Errorf("inspect graph free pages after migration: %w", err)
+	}
+	if freePages == 0 {
+		return nil
+	}
+	if _, err := s.Compact(ctx); err != nil {
+		return fmt.Errorf("compact graph database after migration: %w", err)
 	}
 	return nil
 }

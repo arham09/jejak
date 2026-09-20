@@ -30,10 +30,9 @@ func (v *View) FindSymbolForImpact(ctx context.Context, key string, limit int) (
 		       s.signature, s.receiver, s.start_line, s.end_line, s.exported,
 		       COALESCE(f.path, '')
 		FROM symbols AS s
-		LEFT JOIN files AS f ON f.repo_id = s.repo_id AND f.worktree_id = s.worktree_id
-		  AND f.generation_id = s.generation_id AND f.file_key = s.file_key
-		WHERE s.repo_id = ? AND s.worktree_id = ? AND s.generation_id = ? AND s.symbol_key = ?
-	`, string(v.generation.RepoID), string(v.generation.WorktreeID), int64(v.generation.ID), key).Scan(
+		LEFT JOIN files AS f ON f.generation_key = s.generation_key AND f.file_key = s.file_key
+		WHERE s.generation_key = ? AND s.symbol_key = ?
+	`, v.key, key).Scan(
 		&symbol.Key, &kind, &symbol.PackageKey, &symbol.FileKey, &symbol.Name,
 		&symbol.Signature, &symbol.Receiver, &symbol.Position.StartLine,
 		&symbol.Position.EndLine, &exported, &symbol.Position.Path); err != nil {
@@ -56,9 +55,9 @@ func (v *View) FindSymbolForImpact(ctx context.Context, key string, limit int) (
 }
 
 // SearchSymbols returns bounded symbol candidates whose indexed fields contain
-// at least one of terms. The search is pinned to the view's repository,
-// worktree, and generation; callers perform ranking in their own domain
-// package so SQLite remains a storage concern.
+// at least one of terms. The search is pinned to the view's generation;
+// callers perform ranking in their own domain package so SQLite remains a
+// storage concern.
 func (v *View) SearchSymbols(ctx context.Context, terms []string, limit int) ([]graph.SymbolResult, error) {
 	if v == nil || v.tx == nil {
 		return nil, ErrStoreClosed
@@ -74,11 +73,11 @@ func (v *View) SearchSymbols(ctx context.Context, terms []string, limit int) ([]
 		limit = 2048
 	}
 	clauses := make([]string, 0, len(terms))
-	args := make([]any, 0, len(terms)*8+4)
+	args := make([]any, 0, len(terms)*8+2)
 	for range terms {
 		clauses = append(clauses, `(instr(lower(s.symbol_key), ?) > 0 OR instr(lower(s.name), ?) > 0 OR instr(lower(s.receiver), ?) > 0 OR instr(lower(s.signature), ?) > 0 OR instr(lower(s.package_key), ?) > 0 OR instr(lower(s.file_key), ?) > 0 OR instr(lower(COALESCE(f.path, '')), ?) > 0 OR instr(lower(COALESCE(p.import_path, '')), ?) > 0)`)
 	}
-	args = append(args, string(v.generation.RepoID), string(v.generation.WorktreeID), int64(v.generation.ID))
+	args = append(args, v.key)
 	for _, term := range terms {
 		for range 8 {
 			args = append(args, term)
@@ -90,11 +89,9 @@ func (v *View) SearchSymbols(ctx context.Context, terms []string, limit int) ([]
 		       s.signature, s.receiver, s.start_line, s.end_line, s.exported,
 		       COALESCE(f.path, '')
 		FROM symbols AS s
-		LEFT JOIN files AS f ON f.repo_id = s.repo_id AND f.worktree_id = s.worktree_id
-		  AND f.generation_id = s.generation_id AND f.file_key = s.file_key
-		LEFT JOIN packages AS p ON p.repo_id = s.repo_id AND p.worktree_id = s.worktree_id
-		  AND p.generation_id = s.generation_id AND p.package_key = s.package_key
-		WHERE s.repo_id = ? AND s.worktree_id = ? AND s.generation_id = ?
+		LEFT JOIN files AS f ON f.generation_key = s.generation_key AND f.file_key = s.file_key
+		LEFT JOIN packages AS p ON p.generation_key = s.generation_key AND p.package_key = s.package_key
+		WHERE s.generation_key = ?
 		  AND (` + strings.Join(clauses, " OR ") + `)
 		ORDER BY s.package_key, COALESCE(f.path, ''), s.start_line, s.symbol_key
 		LIMIT ?`
@@ -154,19 +151,5 @@ func (v *View) FindFileMetadata(ctx context.Context, query string) (graph.File, 
 	if query == "" {
 		return graph.File{}, fmt.Errorf("%w: file query is empty", ErrNotFound)
 	}
-	var file graph.File
-	if err := v.tx.QueryRowContext(ctx, `
-		SELECT file_key, path, blob_sha, package_key
-		FROM files
-		WHERE repo_id = ? AND worktree_id = ? AND generation_id = ? AND (path = ? OR file_key = ?)
-		ORDER BY path
-		LIMIT 1
-	`, string(v.generation.RepoID), string(v.generation.WorktreeID), int64(v.generation.ID), query, query).Scan(&file.Key, &file.Path, &file.BlobSHA, &file.PackageKey); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return graph.File{}, fmt.Errorf("%w: file %q", ErrNotFound, query)
-		}
-		return graph.File{}, fmt.Errorf("query graph file metadata %q: %w", query, err)
-	}
-	file.IsTest = strings.Contains(file.PackageKey, "#")
-	return file, nil
+	return v.findFile(ctx, query)
 }

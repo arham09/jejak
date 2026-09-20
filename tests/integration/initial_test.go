@@ -123,11 +123,11 @@ func TestCaller(t *testing.T) {
 `)
 	repo.Commit(t, "semantic graph")
 	dataRoot := t.TempDir()
-	if code, stdout, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "init"); code != 0 {
+	if code, stdout, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "init", "--include-tests"); code != 0 {
 		t.Fatalf("semantic init code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 
-	code, stdout, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "graph", "symbol", "Caller")
+	code, stdout, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "--include-tests", "graph", "symbol", "Caller")
 	if code != 0 {
 		t.Fatalf("caller graph code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -135,7 +135,7 @@ func TestCaller(t *testing.T) {
 		t.Fatalf("caller semantic output = %q", stdout)
 	}
 
-	code, stdout, stderr = runCLI("--data-dir", dataRoot, "-C", repo.Root, "graph", "symbol", "Runner")
+	code, stdout, stderr = runCLI("--data-dir", dataRoot, "-C", repo.Root, "--include-tests", "graph", "symbol", "Runner")
 	if code != 0 {
 		t.Fatalf("interface graph code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
@@ -143,7 +143,7 @@ func TestCaller(t *testing.T) {
 		t.Fatalf("interface semantic output = %q", stdout)
 	}
 
-	code, stdout, stderr = runCLI("--data-dir", dataRoot, "-C", repo.Root, "graph", "symbol", "helper")
+	code, stdout, stderr = runCLI("--data-dir", dataRoot, "-C", repo.Root, "--include-tests", "graph", "symbol", "helper")
 	if code != 0 {
 		t.Fatalf("helper graph code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}

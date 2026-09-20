@@ -131,6 +131,10 @@ type BuildConfig struct {
 	CGOEnabled           string
 	Tags                 []string
 	DownloadDependencies bool
+	// IncludeTests loads _test.go package variants and records test symbols
+	// and test relationships. Test code usually doubles the graph, so it is
+	// excluded unless a caller asks for it.
+	IncludeTests bool
 }
 
 // Normalize sorts tags and trims duplicate/empty entries. It returns a copy so

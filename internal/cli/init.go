@@ -32,7 +32,7 @@ func (a *App) init(ctx context.Context, options Options, args []string) error {
 		if managerErr != nil {
 			return joinClose(managerErr, handle.Close())
 		}
-		ensured, ensureErr := manager.EnsureGraph(ctx, target, graph.BuildConfig{GOOS: options.GOOS, GOARCH: options.GOARCH, CGOEnabled: options.CGOEnabled, Tags: options.Tags, DownloadDependencies: options.DownloadDependencies})
+		ensured, ensureErr := manager.EnsureGraph(ctx, target, buildConfig(options))
 		if ensureErr != nil {
 			for _, diagnostic := range ensured.Analysis.Diagnostics {
 				fmt.Fprintf(a.stderr, "jejak: %s", diagnostic.Message)
@@ -92,7 +92,11 @@ func (a *App) init(ctx context.Context, options Options, args []string) error {
 		fmt.Fprintf(a.stdout, "Files          %d\n", counts.Files)
 		fmt.Fprintf(a.stdout, "Symbols        %d\n", counts.Symbols)
 		fmt.Fprintf(a.stdout, "Edges          %d\n", counts.Edges)
-		fmt.Fprintf(a.stdout, "Tests          %d\n", counts.Tests)
+		if options.IncludeTests {
+			fmt.Fprintf(a.stdout, "Tests          %d\n", counts.Tests)
+		} else {
+			fmt.Fprintln(a.stdout, "Tests          excluded (pass --include-tests to index test packages)")
+		}
 		fmt.Fprintf(a.stdout, "Graph: %s\n", state.Status)
 		fmt.Fprintln(a.stdout, "Graph ready.")
 	} else {

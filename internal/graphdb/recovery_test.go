@@ -70,8 +70,8 @@ func TestRecoverDatabaseMigratesFreshStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != defaultSchema {
-		t.Fatalf("fresh schema version = %d, want %d", version, defaultSchema)
+	if version != latestMigration {
+		t.Fatalf("fresh schema version = %d, want %d", version, latestMigration)
 	}
 	if _, err := fresh.State(context.Background(), target.Repository.ID, target.Worktree.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("fresh store retained graph state: %v", err)

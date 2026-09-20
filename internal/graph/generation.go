@@ -8,6 +8,11 @@ import (
 	"github.com/arham09/jejak/internal/repository"
 )
 
+// SchemaVersion is the record format of stored generations. A generation
+// written under another version is incompatible and is rebuilt, so bump it
+// only when persisted records change shape.
+const SchemaVersion = 2
+
 // GenerationID identifies one candidate or active analysis generation.
 type GenerationID int64
 

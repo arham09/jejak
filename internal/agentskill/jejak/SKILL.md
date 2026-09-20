@@ -39,6 +39,10 @@ instructions take precedence over this workflow.
    before running it.
    Use `jejak init --no-hooks --no-agent-skills` when those integrations were
    not requested and graph initialization is authorized.
+   `init` does not index `_test.go` packages by default, so validation
+   radii then fall back to package-level targets. Pass `--include-tests` to
+   `init` and to every later command when the task needs test symbols and
+   test relationships; it rebuilds the graph once.
 4. For another repository, pass `-C <worktree>` to every command. Treat each
    repository graph independently; Jejak v1 does not traverse across them.
 

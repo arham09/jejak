@@ -237,3 +237,41 @@ func TestRunPropagatesCancellation(t *testing.T) {
 		t.Fatalf("cancellation output = %q", stderr.String())
 	}
 }
+
+func TestParseIncludeTestsBeforeAndAfterCommand(t *testing.T) {
+	options, command, commandArgs, err := parseArgs([]string{"--include-tests", "init", "--no-hooks"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.IncludeTests || command != "init" {
+		t.Fatalf("global --include-tests options=%#v command=%q", options, command)
+	}
+	options, commandArgs, err = parseCommandOptions(options, commandArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.NoHooks || len(commandArgs) != 0 {
+		t.Fatalf("command options=%#v args=%q", options, commandArgs)
+	}
+
+	options, command, commandArgs, err = parseArgs([]string{"sync", "--include-tests", "--quiet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.IncludeTests || command != "sync" {
+		t.Fatalf("options before command parsing=%#v command=%q", options, command)
+	}
+	options, commandArgs, err = parseCommandOptions(options, commandArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.IncludeTests || !options.Quiet || len(commandArgs) != 0 {
+		t.Fatalf("command-position --include-tests options=%#v args=%q", options, commandArgs)
+	}
+	if !buildConfig(options).IncludeTests {
+		t.Fatal("build configuration dropped IncludeTests")
+	}
+	if buildConfig(Options{}).IncludeTests {
+		t.Fatal("tests are included by default")
+	}
+}

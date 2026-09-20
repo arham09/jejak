@@ -32,6 +32,13 @@ type generationCounter interface {
 	GenerationCounts(context.Context, repository.RepoID, repository.WorktreeID, GenerationID) (Counts, error)
 }
 
+// GenerationPruner removes the generations a worktree no longer needs. The
+// manager calls it after every activation so a store holds one durable
+// generation per worktree instead of every graph it ever built.
+type GenerationPruner interface {
+	PruneGenerations(context.Context, repository.RepoID, repository.WorktreeID) (int, error)
+}
+
 // SnapshotProvider materializes one immutable committed tree.
 type SnapshotProvider interface {
 	Snapshot(context.Context, string, string) (*Snapshot, error)
@@ -62,6 +69,9 @@ type EnsureResult struct {
 	Changes    []FileChange
 	Cache      SyntaxCacheStats
 	Reused     bool
+	// PrunedGenerations counts superseded generations removed after the new
+	// generation became active.
+	PrunedGenerations int
 }
 
 // Manager coordinates immutable analysis and atomic generation activation. It
@@ -139,7 +149,7 @@ func (m *Manager) ensureGraph(ctx context.Context, target repository.Target, bui
 
 	active, activeErr := m.activeGeneration(ctx, target, state)
 	fingerprint, fingerprintKnown := m.fingerprint(ctx, input)
-	compatibilityChanged := activeErr != nil || active.State != GenerationActive || active.AnalyzerVersion != analyzerVersion(m.analyzer) || active.SchemaVersion != 1
+	compatibilityChanged := activeErr != nil || active.State != GenerationActive || active.AnalyzerVersion != analyzerVersion(m.analyzer) || active.SchemaVersion != SchemaVersion
 	fingerprintChanged := false
 	if activeErr == nil && state.IndexedHead == commit {
 		fingerprintChanged = !fingerprintKnown || active.BuildFingerprint != fingerprint
@@ -183,7 +193,7 @@ func (m *Manager) ensureGraph(ctx context.Context, target repository.Target, bui
 	}
 	analysis = analysis.Normalize()
 	result.Analysis = analysis
-	generation, err := m.store.CreateGeneration(ctx, Generation{RepoID: target.Repository.ID, WorktreeID: target.Worktree.ID, Commit: commit, BuildFingerprint: analysis.BuildFingerprint, AnalyzerVersion: analysis.AnalyzerVersion, SchemaVersion: 1})
+	generation, err := m.store.CreateGeneration(ctx, Generation{RepoID: target.Repository.ID, WorktreeID: target.Worktree.ID, Commit: commit, BuildFingerprint: analysis.BuildFingerprint, AnalyzerVersion: analysis.AnalyzerVersion, SchemaVersion: SchemaVersion})
 	if err != nil {
 		return result, fmt.Errorf("create graph generation: %w", err)
 	}
@@ -214,6 +224,16 @@ func (m *Manager) ensureGraph(ctx context.Context, target repository.Target, bui
 	generation.State = GenerationActive
 	result.Generation = generation
 	result.Counts = analysis.Count()
+	// The new generation is active and durable at this point. Pruning removes
+	// the superseded ones so the store stays the size of one graph per
+	// worktree; a pruning failure is reported but never rolls back activation.
+	if pruner, ok := m.store.(GenerationPruner); ok {
+		pruned, pruneErr := pruner.PruneGenerations(ctx, target.Repository.ID, target.Worktree.ID)
+		if pruneErr != nil {
+			return result, fmt.Errorf("prune superseded graph generations: %w", pruneErr)
+		}
+		result.PrunedGenerations = pruned
+	}
 	return result, nil
 }
 

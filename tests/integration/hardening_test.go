@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arham09/jejak/internal/config"
 	"github.com/arham09/jejak/internal/git"
+	"github.com/arham09/jejak/internal/graph"
 	"github.com/arham09/jejak/internal/graphdb"
 	"github.com/arham09/jejak/internal/repository"
 )
@@ -184,7 +186,90 @@ func TestMigrationRecovery(t *testing.T) {
 	}
 	defer store.Close()
 	version, err := store.SchemaVersion(context.Background())
-	if err != nil || version != 1 {
-		t.Fatalf("recovered schema version=%d err=%v", version, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compare against a database this binary builds from nothing rather than
+	// a literal, so adding a migration does not require editing this test.
+	if want := freshSchemaVersion(t); version != want {
+		t.Fatalf("recovered schema version = %d, want %d", version, want)
+	}
+}
+
+// freshSchemaVersion reports the schema version of a newly migrated database.
+func freshSchemaVersion(t *testing.T) int {
+	t.Helper()
+	store, err := graphdb.Open(context.Background(), filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	lock, err := store.AcquireWriter(context.Background(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	version, err := store.SchemaVersion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+// TestSynchronizationReplacesInsteadOfAccumulatingGenerations covers the
+// retention contract: repeated init and every sync leave exactly one durable
+// generation per worktree, so a store stays the size of one graph.
+func TestSynchronizationReplacesInsteadOfAccumulatingGenerations(t *testing.T) {
+	repo := newCommittedRepository(t, "github.com/acme/retention")
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	if code, _, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "init", "--no-hooks", "--no-agent-skills"); code != 0 {
+		t.Fatalf("init code=%d stderr=%q", code, stderr)
+	}
+	// A rebuild writes a new generation for the same commit; init must
+	// replace the previous one rather than keep both.
+	if code, _, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "rebuild", "--quiet"); code != 0 {
+		t.Fatalf("rebuild code=%d stderr=%q", code, stderr)
+	}
+	if code, _, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "init", "--no-hooks", "--no-agent-skills"); code != 0 {
+		t.Fatalf("repeated init code=%d stderr=%q", code, stderr)
+	}
+	for value := 43; value <= 45; value++ {
+		repo.Write(t, "main.go", "package fixture\n\nfunc Answer() int { return "+strconv.Itoa(value)+" }\n")
+		repo.Commit(t, "advance")
+		if code, _, stderr := runCLI("--data-dir", dataRoot, "-C", repo.Root, "sync", "--quiet"); code != 0 {
+			t.Fatalf("sync %d code=%d stderr=%q", value, code, stderr)
+		}
+	}
+	target, err := repository.Resolve(context.Background(), git.NewClient("git"), repo.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := config.RepositoryPathsFor(dataRoot, string(target.Repository.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := graphdb.Open(context.Background(), paths.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state, err := store.State(context.Background(), target.Repository.ID, target.Worktree.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != graph.StatusReady || state.ActiveGeneration == nil || *state.ActiveGeneration < 5 {
+		t.Fatalf("state after five builds = %#v", state)
+	}
+	for id := int64(1); id < int64(*state.ActiveGeneration); id++ {
+		if _, err := store.Generation(context.Background(), target.Repository.ID, target.Worktree.ID, graph.GenerationID(id)); err == nil {
+			t.Fatalf("superseded generation %d still stored", id)
+		}
+	}
+	counts, err := store.GenerationCounts(context.Background(), target.Repository.ID, target.Worktree.ID, *state.ActiveGeneration)
+	if err != nil || counts.Symbols == 0 {
+		t.Fatalf("active generation counts = %#v err=%v", counts, err)
 	}
 }

@@ -59,8 +59,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SchemaVersion() error = %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema version = %d, want 1", version)
+	if version != latestMigration {
+		t.Fatalf("schema version = %d, want %d", version, latestMigration)
 	}
 	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("second Migrate() error = %v", err)
@@ -69,8 +69,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("migration rows = %d, want 1", count)
+	if count != latestMigration {
+		t.Fatalf("migration rows = %d, want %d", count, latestMigration)
 	}
 	for _, table := range []string{"repositories", "worktrees", "graph_state", "graph_generations", "nodes", "edges", "parse_cache"} {
 		var got string
