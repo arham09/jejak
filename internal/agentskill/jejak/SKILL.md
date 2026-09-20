@@ -76,6 +76,12 @@ jejak --json impact --task "<task>"
 - Inspect ambiguous results with `jejak graph symbol <name>` or
   `jejak graph file <path>`. When lexical matching remains ambiguous, rerun the
   task report with an exact canonical `--seed` from graph output.
+- Keep `--json` for extraction. When a person rather than an agent will read a
+  `graph` result, `--format svg` renders the query in process and needs no
+  installed Graphviz, and `--format dot` emits the text for another renderer.
+  Write either to a file and cite the path; do not paste rendered markup into
+  the conversation. Both follow the same overlay and `--committed` source
+  boundaries as the default output, and neither combines with `--json`.
 - Read the selected source and graph evidence. Treat relevance and confidence
   as ranking evidence, not runtime certainty. Broaden validation for
   reflection, registration, plugins, and unresolved dynamic calls.
