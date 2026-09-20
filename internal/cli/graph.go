@@ -138,7 +138,7 @@ func renderSymbols(ctx context.Context, output io.Writer, view graphReader, targ
 	}
 	if format != graphOutputText {
 		export := newSymbolGraphExport(target, view.Generation(), source, query, results)
-		return renderGraphExport(output, format, export)
+		return renderGraphExport(ctx, output, format, export)
 	}
 	fmt.Fprintf(output, "Repository %s\n", target.Repository.ID)
 	fmt.Fprintf(output, "Generation %d\n", view.Generation().ID)
@@ -221,7 +221,7 @@ func renderFile(ctx context.Context, output io.Writer, view graphReader, target 
 	}
 	if format != graphOutputText {
 		export := newFileGraphExport(target, view.Generation(), source, query, result)
-		return renderGraphExport(output, format, export)
+		return renderGraphExport(ctx, output, format, export)
 	}
 	fmt.Fprintf(output, "Repository %s\n", target.Repository.ID)
 	fmt.Fprintf(output, "Generation %d\n", view.Generation().ID)

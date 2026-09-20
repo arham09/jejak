@@ -289,7 +289,7 @@ Commands implemented in the foundation, Go intelligence, semantic graph, increme
   repos list             list registered repositories
   graph symbol <name>    inspect an effective symbol and relationships
   graph file <path>      inspect an effective source file
-      --format <name>    graph output: text (default), json, or dot
+      --format <name>    graph output: text (default), json, dot, or svg
       --committed         force graph inspection to the durable generation
       --working-tree      inspect the temporary working-tree overlay
   sync                   synchronize the graph with committed HEAD

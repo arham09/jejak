@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ const (
 	graphOutputText graphOutputFormat = "text"
 	graphOutputJSON graphOutputFormat = "json"
 	graphOutputDOT  graphOutputFormat = "dot"
+	graphOutputSVG  graphOutputFormat = "svg"
 )
 
 func parseGraphOutputFormat(value string) (graphOutputFormat, error) {
@@ -30,8 +32,10 @@ func parseGraphOutputFormat(value string) (graphOutputFormat, error) {
 		return graphOutputJSON, nil
 	case graphOutputDOT:
 		return graphOutputDOT, nil
+	case graphOutputSVG:
+		return graphOutputSVG, nil
 	default:
-		return "", fmt.Errorf("%w: unsupported graph format %q (want text, json, or dot)", errUsage, value)
+		return "", fmt.Errorf("%w: unsupported graph format %q (want text, json, dot, or svg)", errUsage, value)
 	}
 }
 
@@ -587,12 +591,14 @@ func nonEmptyDetails(value string) []string {
 	return []string{value}
 }
 
-func renderGraphExport(output io.Writer, format graphOutputFormat, export graphExport) error {
+func renderGraphExport(ctx context.Context, output io.Writer, format graphOutputFormat, export graphExport) error {
 	switch format {
 	case graphOutputJSON:
 		return writeGraphJSON(output, export)
 	case graphOutputDOT:
 		return writeGraphDOT(output, export)
+	case graphOutputSVG:
+		return writeGraphSVG(ctx, output, export)
 	default:
 		return fmt.Errorf("%w: unsupported graph output format %q", errUsage, format)
 	}

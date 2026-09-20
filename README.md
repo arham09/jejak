@@ -41,6 +41,7 @@ go build -o jejak ./cmd/jejak
 ./jejak status
 ./jejak graph symbol MyFunction
 ./jejak graph --format json symbol MyFunction
+./jejak graph --format svg symbol MyFunction > graph.svg
 ./jejak graph --format dot symbol MyFunction | dot -Tsvg -o graph.svg
 ./jejak impact --task "change MyFunction behavior"
 ./jejak context --task "change MyFunction behavior"
@@ -136,19 +137,27 @@ includes the query, repository/worktree/generation provenance, typed nodes,
 directed edges, confidence, evidence locations, and historical markers. The
 existing `--json` flag is also accepted as the graph JSON compatibility alias.
 
-Pass `--format dot` for deterministic Graphviz DOT from the same projection:
+Pass `--format dot` for deterministic Graphviz DOT from the same projection,
+or `--format svg` for a rendered picture:
 
 ```sh
+jejak graph --format svg symbol MyFunction > graph.svg
+jejak graph --format svg --committed file internal/payment.go > graph.svg
 jejak graph --format dot symbol MyFunction | dot -Tsvg -o graph.svg
-jejak graph --format dot --committed file internal/payment.go | dot -Tpng -o graph.png
 ```
 
-Graph exports are query-scoped and read-only. Jejak emits DOT but does not
-install or invoke Graphviz; the `dot` command is an optional external renderer.
-Both formats follow the default working-tree overlay and explicit
-`--committed` source boundaries. Possible, unresolved, inferred, and
-historical relationships remain explicitly labelled rather than implying
-runtime certainty.
+`--format svg` renders in process. Jejak embeds the Graphviz layout engine
+compiled to WebAssembly, so it needs no installed `dot` command, no CGO, and
+no network access. The rendered SVG is deterministic for a given export. Use
+`--format dot` instead when you want the text, another layout engine, or an
+output format that Jejak does not render, such as PNG or PDF; the `dot`
+command is then an optional external renderer that Jejak neither installs nor
+invokes.
+
+Graph exports are query-scoped and read-only. Every format follows the default
+working-tree overlay and explicit `--committed` source boundaries. Possible,
+unresolved, inferred, and historical relationships remain explicitly labelled
+rather than implying runtime certainty.
 
 Pass `--json` to `doctor`, `gc`, `impact`, or `context` for a versioned,
 machine-readable report. Health and maintenance commands distinguish healthy,
