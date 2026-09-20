@@ -31,11 +31,14 @@ func (v *View) SearchSymbols(ctx context.Context, terms []string, limit int) ([]
 		v.mu.RUnlock()
 		return nil, errors.New("overlay view is closed")
 	}
-	result := make([]graph.SymbolResult, 0)
+	// Matched term counts keep the truncation below on the strongest
+	// candidates. Ordering by path alone and then cutting would drop a symbol
+	// that matches every term whenever enough weaker matches sort ahead of it.
+	scored := make([]scoredSymbol, 0)
 	seen := make(map[string]struct{})
 	for key, item := range v.symbols {
-		if symbolMatches(item.Symbol, terms) {
-			result = append(result, cloneSymbolResult(item))
+		if matched := matchedTerms(item.Symbol, terms); matched > 0 {
+			scored = append(scored, scoredSymbol{result: cloneSymbolResult(item), matched: matched})
 			seen[key] = struct{}{}
 		}
 	}
@@ -52,14 +55,30 @@ func (v *View) SearchSymbols(ctx context.Context, terms []string, limit int) ([]
 			continue
 		}
 		item = sanitizeResult(item, masked, affected)
-		result = append(result, item)
+		scored = append(scored, scoredSymbol{result: item, matched: matchedTerms(item.Symbol, terms)})
 		seen[item.Symbol.Key] = struct{}{}
 	}
-	sort.SliceStable(result, func(i, j int) bool { return symbolResultLess(result[i], result[j]) })
-	if len(result) > limit {
-		result = result[:limit]
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].matched != scored[j].matched {
+			return scored[i].matched > scored[j].matched
+		}
+		return symbolResultLess(scored[i].result, scored[j].result)
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	result := make([]graph.SymbolResult, 0, len(scored))
+	for _, item := range scored {
+		result = append(result, item.result)
 	}
 	return result, nil
+}
+
+// scoredSymbol pairs one candidate with how many distinct task terms it
+// matches, so ordering can prefer relevance before the deterministic tiebreak.
+type scoredSymbol struct {
+	result  graph.SymbolResult
+	matched int
 }
 
 // FindSymbols returns effective exact-key/name matches. Deleted baseline keys
@@ -206,14 +225,18 @@ func baseSymbolMasked(symbol graph.Symbol, masked map[string]struct{}, affected 
 	return pathSetContains(affected, symbol.Position.Path)
 }
 
-func symbolMatches(symbol graph.Symbol, terms []string) bool {
+// matchedTerms counts how many distinct terms appear in a symbol's indexed
+// fields. It mirrors the count the store computes, so overlay and base
+// candidates compete on the same scale.
+func matchedTerms(symbol graph.Symbol, terms []string) int {
 	fields := strings.ToLower(strings.Join([]string{symbol.Key, symbol.Name, symbol.Receiver, symbol.Signature, symbol.PackageKey, symbol.FileKey, symbol.Position.Path}, " "))
+	matched := 0
 	for _, term := range terms {
 		if strings.Contains(fields, term) {
-			return true
+			matched++
 		}
 	}
-	return false
+	return matched
 }
 
 func normalizeTerms(values []string) []string {

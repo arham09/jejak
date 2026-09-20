@@ -107,3 +107,65 @@ func TestViewProvidesHistoricalFileMetadataForDeletedSymbols(t *testing.T) {
 		t.Fatal("deleted file unexpectedly remained in effective file query")
 	}
 }
+
+// rankingReader hands the overlay every base match in alphabetical order. It
+// ignores the limit on purpose: the store applies its own bound, and this
+// fixture isolates the second bound that the overlay applies to the merged
+// set, where the weakest matches sort first.
+type rankingReader struct {
+	gen     graph.Generation
+	results []graph.SymbolResult
+}
+
+func (r *rankingReader) Generation() graph.Generation { return r.gen }
+
+func (r *rankingReader) SearchSymbols(context.Context, []string, int) ([]graph.SymbolResult, error) {
+	return append([]graph.SymbolResult(nil), r.results...), nil
+}
+
+func (r *rankingReader) FindSymbols(context.Context, string) ([]graph.SymbolResult, error) {
+	return nil, nil
+}
+
+func (r *rankingReader) FindFile(_ context.Context, query string) (graph.FileResult, error) {
+	return graph.FileResult{}, fmt.Errorf("file %q not found", query)
+}
+
+// The overlay bounds its merged result too, so it must rank before truncating.
+// Ordering by path alone dropped the symbol that matched every term.
+func TestOverlaySearchKeepsBestMatchesWhenTruncating(t *testing.T) {
+	ctx := context.Background()
+	gen := graph.Generation{RepoID: "repo", WorktreeID: "worktree", ID: 1, Commit: "commit", BuildFingerprint: "base"}
+	packageKey := "go:package:fixture"
+	results := make([]graph.SymbolResult, 0, 21)
+	for index := range 20 {
+		path := fmt.Sprintf("a%03d/weak.go", index)
+		name := fmt.Sprintf("CreateThing%03d", index)
+		results = append(results, graph.SymbolResult{Symbol: graph.Symbol{Key: "symbol:" + name, Kind: graph.NodeFunction, PackageKey: packageKey, FileKey: "file:" + path, Name: name, Position: graph.Position{Path: path, StartLine: 1, EndLine: 1}}})
+	}
+	strongPath := "z999/draft.go"
+	results = append(results, graph.SymbolResult{Symbol: graph.Symbol{Key: "symbol:CreateDraftTransaction", Kind: graph.NodeFunction, PackageKey: packageKey, FileKey: "file:" + strongPath, Name: "CreateDraftTransaction", Position: graph.Position{Path: strongPath, StartLine: 1, EndLine: 1}}})
+
+	base := &rankingReader{gen: gen, results: results}
+	snapshot := &Snapshot{Root: t.TempDir()}
+	view, err := newView(base, snapshot, Manifest{ID: "manifest"}, graph.AnalysisResult{BuildFingerprint: "effective"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = view.Close() }()
+
+	found, err := view.SearchSymbols(ctx, []string{"create", "draft", "transaction"}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("results = %d, want 3", len(found))
+	}
+	if found[0].Symbol.Name != "CreateDraftTransaction" {
+		names := make([]string, 0, len(found))
+		for _, item := range found {
+			names = append(names, item.Symbol.Name)
+		}
+		t.Fatalf("first result = %q, want CreateDraftTransaction; got %v", found[0].Symbol.Name, names)
+	}
+}
